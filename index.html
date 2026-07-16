@@ -53,6 +53,7 @@
   h2.sec{font-size:14px; margin:18px 0 8px; border-left:5px solid var(--blue); padding-left:8px;}
   .empty{color:var(--gray); text-align:center; padding:30px;}
   .prodname{color:var(--gray); font-size:11px;}
+  td.ord{font-variant-numeric:tabular-nums; word-break:break-all; font-size:11px; color:#333;}
   .print-head{display:none;}
   @media print{
     body{background:#fff; font-size:11px;}
@@ -82,19 +83,6 @@
       </div>
       <input type="file" id="fileInput" multiple accept=".xlsx,.xls,.csv">
       <div class="files" id="fileList"></div>
-
-      <div class="controls">
-        <label><input type="checkbox" id="colTel" checked> 電話番号を表示</label>
-        <label><input type="checkbox" id="colZipHyphen" checked> 〒に区切り（812-0053）</label>
-        <label><input type="checkbox" id="colFullName"> 商品名フル表示</label>
-        <label>並び順:
-          <select id="sortSel">
-            <option value="product">商品順</option>
-            <option value="name">宛名順</option>
-            <option value="file">ファイル順</option>
-          </select>
-        </label>
-      </div>
 
       <div class="btns">
         <button class="act" id="genBtn" disabled>リストを作成</button>
@@ -147,9 +135,6 @@ $('clearBtn').addEventListener('click', ()=>{
   filesData=[]; renderFileList(); $('output').style.display='none';
   $('emptyMsg').style.display='block'; $('genBtn').disabled=true; $('printBtn').disabled=true;
   fileInput.value='';
-});
-['colTel','colZipHyphen','colFullName','sortSel'].forEach(id=>{
-  $(id).addEventListener('change', ()=>{ if(filesData.length) render(); });
 });
 
 function handleFiles(fileList){
@@ -234,15 +219,10 @@ function fmtZip(z, hyphen){
 }
 
 function render(){
-  const useFull = $('colFullName').checked;
-  const showTel = $('colTel').checked;
-  const hyphen = $('colZipHyphen').checked;
-  const sortBy = $('sortSel').value;
-
   let recs=[];
-  filesData.forEach(f=>{
+  filesData.forEach((f,fi)=>{
     const src = f.name.replace(/\.(xlsx|xls|csv)$/i,'');
-    f.rows.forEach(r=>recs.push({...r, src, product:shortName(r,useFull)}));
+    f.rows.forEach((r,ri)=>recs.push({...r, src, fileIdx:fi, rowIdx:ri, product:(r.fullname||shortName(r,true))}));
   });
 
   if(!recs.length){
@@ -250,11 +230,8 @@ function render(){
     $('emptyMsg').textContent='有効な注文データが見つかりませんでした。'; return;
   }
 
-  recs.sort((a,b)=>{
-    if(sortBy==='name') return a.name.localeCompare(b.name,'ja');
-    if(sortBy==='file') return a.src.localeCompare(b.src,'ja')||a.order.localeCompare(b.order);
-    return a.src.localeCompare(b.src,'ja')||a.product.localeCompare(b.product,'ja')||a.name.localeCompare(b.name,'ja');
-  });
+  // ファイル順（読み込んだ順・行順を保持）
+  recs.sort((a,b)=> a.fileIdx-b.fileIdx || a.rowIdx-b.rowIdx);
 
   const totalLines = recs.length;
   const totalQty = recs.reduce((s,r)=>s+(parseInt(r.qty)||1),0);
@@ -268,17 +245,12 @@ function render(){
   sh+='</tbody></table>';
   $('summary').innerHTML=sh;
 
-  // main table
-  let th='<table><thead><tr><th class="c">No</th><th>宛名</th><th>〒</th><th>住所</th>';
-  if(showTel) th+='<th>電話</th>';
-  th+='<th>商品</th><th class="c">個数</th></tr></thead><tbody>';
+  // main table : 注文ID → 宛名 → 〒・住所 → 商品名 → 個数
+  let th='<table><thead><tr><th class="c">No</th><th>注文ID</th><th>宛名</th><th>〒・住所</th><th>商品名</th><th class="c">個数</th></tr></thead><tbody>';
   recs.forEach((r,i)=>{
-    let prodCell = esc(r.product);
-    if(!useFull && SKU_SHORT[r.sku] && r.fullname)
-      prodCell += `<div class="prodname">${esc(r.fullname.slice(0,20))}…</div>`;
-    th+=`<tr><td class="c">${i+1}</td><td>${esc(r.name)}</td><td>${esc(fmtZip(r.zip,hyphen))}</td><td>${esc(r.addr)}</td>`;
-    if(showTel) th+=`<td>${esc(r.tel)}</td>`;
-    th+=`<td>${prodCell}</td><td class="c">${esc(r.qty)}</td></tr>`;
+    const addr = (fmtZip(r.zip,true) + ' ' + r.addr).trim();
+    th+=`<tr><td class="c">${i+1}</td><td class="ord">${esc(r.order)}</td><td>${esc(r.name)}</td>`+
+        `<td>${esc(addr)}</td><td>${esc(r.product)}</td><td class="c">${esc(r.qty)}</td></tr>`;
   });
   th+='</tbody></table>';
   $('listTable').innerHTML=th;
