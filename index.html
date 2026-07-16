@@ -1,0 +1,309 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>発送リスト作成ツール</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<style>
+  :root{
+    --blue:#2b6cb0; --blue-l:#d5e5f5; --blue-xl:#f4f8fc;
+    --gray:#666; --line:#bcbcbc; --bg:#f5f6f8;
+  }
+  *{box-sizing:border-box;}
+  body{
+    font-family:"Hiragino Kaku Gothic ProN","Yu Gothic","Meiryo",sans-serif;
+    margin:0; background:var(--bg); color:#222; font-size:14px;
+  }
+  .wrap{max-width:1100px; margin:0 auto; padding:20px;}
+  h1{font-size:20px; margin:0 0 4px;}
+  .sub{color:var(--gray); font-size:13px; margin-bottom:16px;}
+  .panel{
+    background:#fff; border:1px solid #e2e2e2; border-radius:10px;
+    padding:18px; margin-bottom:18px;
+  }
+  .drop{
+    border:2px dashed var(--blue); border-radius:10px; padding:28px;
+    text-align:center; background:#fafcff; cursor:pointer; transition:.15s;
+  }
+  .drop.hover{background:var(--blue-l);}
+  .drop b{color:var(--blue);}
+  .drop small{display:block; color:var(--gray); margin-top:6px;}
+  #fileInput{display:none;}
+  .files{margin-top:12px; font-size:13px;}
+  .files .f{display:inline-flex; align-items:center; gap:6px; background:var(--blue-xl);
+    border:1px solid var(--blue-l); border-radius:20px; padding:4px 12px; margin:3px 4px 0 0;}
+  .files .f button{border:none; background:none; color:var(--gray); cursor:pointer; font-size:15px; line-height:1;}
+  .controls{display:flex; flex-wrap:wrap; gap:18px; align-items:center; margin-top:14px;}
+  .controls label{font-size:13px; display:flex; align-items:center; gap:5px; cursor:pointer;}
+  .btns{margin-top:16px; display:flex; gap:10px; flex-wrap:wrap;}
+  button.act{
+    background:var(--blue); color:#fff; border:none; border-radius:8px;
+    padding:10px 20px; font-size:14px; cursor:pointer; font-weight:bold;
+  }
+  button.act.ghost{background:#fff; color:var(--blue); border:1.5px solid var(--blue);}
+  button.act:disabled{background:#bbb; cursor:not-allowed;}
+  .meta{font-size:13px; color:var(--gray); margin:4px 0 12px;}
+  table{border-collapse:collapse; width:100%; font-size:12px;}
+  th,td{border:1px solid var(--line); padding:4px 6px; vertical-align:middle; text-align:left;}
+  thead th{background:var(--blue-l);}
+  tbody tr:nth-child(even){background:var(--blue-xl);}
+  td.c,th.c{text-align:center;}
+  .sumtbl td, .sumtbl th{padding:4px 8px;}
+  h2.sec{font-size:14px; margin:18px 0 8px; border-left:5px solid var(--blue); padding-left:8px;}
+  .empty{color:var(--gray); text-align:center; padding:30px;}
+  .prodname{color:var(--gray); font-size:11px;}
+  .print-head{display:none;}
+  @media print{
+    body{background:#fff; font-size:11px;}
+    .noprint{display:none !important;}
+    .wrap{max-width:none; padding:0;}
+    .panel{border:none; padding:0; margin:0;}
+    .print-head{display:block; margin-bottom:6px;}
+    table{font-size:10px;}
+    th,td{padding:2.5px 4px;}
+    thead{display:table-header-group;}
+    tr{page-break-inside:avoid;}
+    @page{size:A4; margin:10mm;}
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="noprint">
+    <h1>発送リスト作成ツール</h1>
+    <div class="sub">TikTok Shop の注文エクスポート（Excel / CSV）を読み込んで、宛名・住所・商品・個数の一覧を作り、そのまま印刷できます。データはブラウザ内だけで処理され、どこにも送信されません。</div>
+
+    <div class="panel">
+      <div class="drop" id="drop">
+        <b>ファイルをドラッグ＆ドロップ</b>、またはクリックして選択<br>
+        <small>.xlsx / .xls / .csv（複数選択・追加読み込みOK）</small>
+      </div>
+      <input type="file" id="fileInput" multiple accept=".xlsx,.xls,.csv">
+      <div class="files" id="fileList"></div>
+
+      <div class="controls">
+        <label><input type="checkbox" id="colTel" checked> 電話番号を表示</label>
+        <label><input type="checkbox" id="colZipHyphen" checked> 〒に区切り（812-0053）</label>
+        <label><input type="checkbox" id="colFullName"> 商品名フル表示</label>
+        <label>並び順:
+          <select id="sortSel">
+            <option value="product">商品順</option>
+            <option value="name">宛名順</option>
+            <option value="file">ファイル順</option>
+          </select>
+        </label>
+      </div>
+
+      <div class="btns">
+        <button class="act" id="genBtn" disabled>リストを作成</button>
+        <button class="act ghost" id="printBtn" disabled>🖨 印刷 / PDF保存</button>
+        <button class="act ghost" id="clearBtn">クリア</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="panel" id="result">
+    <div class="empty" id="emptyMsg">ファイルを読み込むとここに一覧が表示されます。</div>
+    <div id="output" style="display:none;">
+      <div class="print-head">
+        <h1 style="font-size:16px;margin:0;">発送リスト（未発送）</h1>
+      </div>
+      <div class="meta" id="meta"></div>
+      <h2 class="sec">■ 商品別 集計</h2>
+      <div id="summary"></div>
+      <h2 class="sec">■ 発送先一覧</h2>
+      <div id="listTable"></div>
+    </div>
+  </div>
+
+</div>
+
+<script>
+const SKU_SHORT = {
+  'wo01':'ウィッグオイル 300mL',
+  'ri_se01':'姿勢サポーター',
+  'ri_se02':'姿勢サポーター',
+  'belt01':'メンズベルト',
+  'belt02':'メンズベルト',
+  'ri_wa01':'二つ折り財布',
+};
+
+let filesData = []; // {name, rows:[{...}]}
+
+const $ = id => document.getElementById(id);
+const drop = $('drop'), fileInput = $('fileInput');
+
+drop.addEventListener('click', ()=>fileInput.click());
+['dragover','dragenter'].forEach(e=>drop.addEventListener(e,ev=>{ev.preventDefault();drop.classList.add('hover');}));
+['dragleave','drop'].forEach(e=>drop.addEventListener(e,ev=>{ev.preventDefault();drop.classList.remove('hover');}));
+drop.addEventListener('drop', ev=>handleFiles(ev.dataTransfer.files));
+fileInput.addEventListener('change', ev=>handleFiles(ev.target.files));
+
+$('genBtn').addEventListener('click', render);
+$('printBtn').addEventListener('click', ()=>window.print());
+$('clearBtn').addEventListener('click', ()=>{
+  filesData=[]; renderFileList(); $('output').style.display='none';
+  $('emptyMsg').style.display='block'; $('genBtn').disabled=true; $('printBtn').disabled=true;
+  fileInput.value='';
+});
+['colTel','colZipHyphen','colFullName','sortSel'].forEach(id=>{
+  $(id).addEventListener('change', ()=>{ if(filesData.length) render(); });
+});
+
+function handleFiles(fileList){
+  const arr = Array.from(fileList);
+  let pending = arr.length;
+  if(!pending) return;
+  arr.forEach(file=>{
+    const reader = new FileReader();
+    reader.onload = e=>{
+      try{
+        const wb = XLSX.read(e.target.result, {type:'array'});
+        const ws = wb.Sheets[wb.SheetNames[0]];
+        const aoa = XLSX.utils.sheet_to_json(ws, {header:1, defval:''});
+        const rows = parseSheet(aoa);
+        filesData.push({name:file.name, rows});
+      }catch(err){
+        alert('読み込みエラー: '+file.name+'\n'+err.message);
+      }
+      if(--pending===0){ renderFileList(); $('genBtn').disabled=false; render(); }
+    };
+    reader.readAsArrayBuffer(file);
+  });
+}
+
+// find header row (contains 受取人 or 注文ID), data starts after description row
+function parseSheet(aoa){
+  let headerIdx = -1;
+  for(let i=0;i<Math.min(aoa.length,5);i++){
+    const row = aoa[i].map(x=>String(x).trim());
+    if(row.includes('注文ID') && (row.includes('受取人')||row.includes('数量'))){ headerIdx=i; break; }
+  }
+  if(headerIdx<0) headerIdx=0;
+  const header = aoa[headerIdx].map(x=>String(x).trim());
+  const col = {};
+  header.forEach((h,i)=>{ if(h && !(h in col)) col[h]=i; });
+  const g=(row,name)=>{ const i=col[name]; return (i==null||row[i]==null)?'':String(row[i]).trim(); };
+
+  // detect if row after header is a description row (row where 注文ID cell is a description sentence)
+  let start = headerIdx+1;
+  const idIdx = col['注文ID'];
+  if(idIdx!=null){
+    const first = String(aoa[start] ? aoa[start][idIdx] : '').trim();
+    // real order IDs are long digit strings; description contains 。 or non-digits
+    if(!/^\d{6,}$/.test(first)) start = headerIdx+2;
+  }
+
+  const out=[];
+  for(let i=start;i<aoa.length;i++){
+    const row = aoa[i];
+    if(!row) continue;
+    const order = g(row,'注文ID');
+    if(!/^\d{6,}$/.test(order)) continue;
+    const addr = ['都道府県','市区町村','町名','詳細住所1','詳細住所2']
+      .map(k=>g(row,k)).filter(Boolean).join('');
+    out.push({
+      order,
+      name: g(row,'受取人'),
+      zip: g(row,'郵便番号'),
+      addr,
+      tel: g(row,'電話番号'),
+      sku: g(row,'セラーSKU'),
+      fullname: g(row,'商品名'),
+      variation: g(row,'バリエーション'),
+      qty: g(row,'数量') || '1',
+    });
+  }
+  return out;
+}
+
+function shortName(r, useFull){
+  let base = SKU_SHORT[r.sku] || (useFull ? r.fullname : (r.fullname.slice(0,16)));
+  if(useFull) base = r.fullname || base;
+  const v = r.variation;
+  if(v && v!=='デフォルト') base += ' ['+v+']';
+  return base;
+}
+function fmtZip(z, hyphen){
+  if(!z) return '';
+  const d = z.replace(/[^0-9]/g,'');
+  if(hyphen && d.length===7) return '〒'+d.slice(0,3)+'-'+d.slice(3);
+  return '〒'+z;
+}
+
+function render(){
+  const useFull = $('colFullName').checked;
+  const showTel = $('colTel').checked;
+  const hyphen = $('colZipHyphen').checked;
+  const sortBy = $('sortSel').value;
+
+  let recs=[];
+  filesData.forEach(f=>{
+    const src = f.name.replace(/\.(xlsx|xls|csv)$/i,'');
+    f.rows.forEach(r=>recs.push({...r, src, product:shortName(r,useFull)}));
+  });
+
+  if(!recs.length){
+    $('output').style.display='none'; $('emptyMsg').style.display='block';
+    $('emptyMsg').textContent='有効な注文データが見つかりませんでした。'; return;
+  }
+
+  recs.sort((a,b)=>{
+    if(sortBy==='name') return a.name.localeCompare(b.name,'ja');
+    if(sortBy==='file') return a.src.localeCompare(b.src,'ja')||a.order.localeCompare(b.order);
+    return a.src.localeCompare(b.src,'ja')||a.product.localeCompare(b.product,'ja')||a.name.localeCompare(b.name,'ja');
+  });
+
+  const totalLines = recs.length;
+  const totalQty = recs.reduce((s,r)=>s+(parseInt(r.qty)||1),0);
+
+  // summary
+  const summ = {};
+  recs.forEach(r=>{ const k=r.src+''+r.product; summ[k]=(summ[k]||0)+(parseInt(r.qty)||1); });
+  let sh='<table class="sumtbl"><thead><tr><th>ファイル</th><th>商品</th><th class="c">合計個数</th></tr></thead><tbody>';
+  Object.keys(summ).forEach(k=>{ const [src,prod]=k.split('');
+    sh+=`<tr><td>${esc(src)}</td><td>${esc(prod)}</td><td class="c">${summ[k]}</td></tr>`; });
+  sh+='</tbody></table>';
+  $('summary').innerHTML=sh;
+
+  // main table
+  let th='<table><thead><tr><th class="c">No</th><th>宛名</th><th>〒</th><th>住所</th>';
+  if(showTel) th+='<th>電話</th>';
+  th+='<th>商品</th><th class="c">個数</th></tr></thead><tbody>';
+  recs.forEach((r,i)=>{
+    let prodCell = esc(r.product);
+    if(!useFull && SKU_SHORT[r.sku] && r.fullname)
+      prodCell += `<div class="prodname">${esc(r.fullname.slice(0,20))}…</div>`;
+    th+=`<tr><td class="c">${i+1}</td><td>${esc(r.name)}</td><td>${esc(fmtZip(r.zip,hyphen))}</td><td>${esc(r.addr)}</td>`;
+    if(showTel) th+=`<td>${esc(r.tel)}</td>`;
+    th+=`<td>${prodCell}</td><td class="c">${esc(r.qty)}</td></tr>`;
+  });
+  th+='</tbody></table>';
+  $('listTable').innerHTML=th;
+
+  const today=new Date().toLocaleDateString('ja-JP');
+  $('meta').textContent=`作成日: ${today}　／　総注文明細: ${totalLines} 件　総個数: ${totalQty} 個　（読込ファイル: ${filesData.map(f=>f.name).join(', ')}）`;
+
+  $('emptyMsg').style.display='none';
+  $('output').style.display='block';
+  $('printBtn').disabled=false;
+}
+
+function renderFileList(){
+  const el=$('fileList');
+  if(!filesData.length){ el.innerHTML=''; return; }
+  el.innerHTML = filesData.map((f,i)=>
+    `<span class="f">📄 ${esc(f.name)} <small>(${f.rows.length}件)</small> <button data-i="${i}" title="削除">×</button></span>`
+  ).join('');
+  el.querySelectorAll('button').forEach(b=>b.addEventListener('click',e=>{
+    filesData.splice(+e.target.dataset.i,1); renderFileList();
+    if(filesData.length) render(); else $('clearBtn').click();
+  }));
+}
+
+function esc(s){ return String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+</script>
+</body>
+</html>
