@@ -204,9 +204,9 @@ function parseSheet(aoa){
   return out;
 }
 
-function shortName(r, useFull){
-  let base = SKU_SHORT[r.sku] || (useFull ? r.fullname : (r.fullname.slice(0,16)));
-  if(useFull) base = r.fullname || base;
+function shortName(r){
+  // 登録済みSKUは短縮名。未登録は商品名フルにフォールバック
+  let base = SKU_SHORT[r.sku] || r.fullname;
   const v = r.variation;
   if(v && v!=='デフォルト') base += ' ['+v+']';
   return base;
@@ -222,7 +222,7 @@ function render(){
   let recs=[];
   filesData.forEach((f,fi)=>{
     const src = f.name.replace(/\.(xlsx|xls|csv)$/i,'');
-    f.rows.forEach((r,ri)=>recs.push({...r, src, fileIdx:fi, rowIdx:ri, product:(r.fullname||shortName(r,true))}));
+    f.rows.forEach((r,ri)=>recs.push({...r, src, fileIdx:fi, rowIdx:ri, product:shortName(r)}));
   });
 
   if(!recs.length){
