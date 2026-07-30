@@ -140,17 +140,47 @@ $('clearBtn').addEventListener('click', ()=>{
   fileInput.value='';
 });
 
+// CSVを文字列のまま解析（数値・日付への自動変換をしない）。引用符・改行・エスケープ対応
+function parseCSV(text){
+  if(text.charCodeAt(0)===0xFEFF) text=text.slice(1); // BOM除去
+  const rows=[]; let row=[]; let field=''; let inQ=false; let i=0;
+  while(i<text.length){
+    const c=text[i];
+    if(inQ){
+      if(c==='"'){
+        if(text[i+1]==='"'){ field+='"'; i+=2; continue; }
+        inQ=false; i++; continue;
+      }
+      field+=c; i++; continue;
+    }
+    if(c==='"'){ inQ=true; i++; continue; }
+    if(c===','){ row.push(field); field=''; i++; continue; }
+    if(c==='\r'){ i++; continue; }
+    if(c==='\n'){ row.push(field); rows.push(row); row=[]; field=''; i++; continue; }
+    field+=c; i++;
+  }
+  if(field!=='' || row.length){ row.push(field); rows.push(row); }
+  return rows;
+}
+
 function handleFiles(fileList){
   const arr = Array.from(fileList);
   let pending = arr.length;
   if(!pending) return;
   arr.forEach(file=>{
+    const isCsv = /\.csv$/i.test(file.name);
     const reader = new FileReader();
     reader.onload = e=>{
       try{
-        const wb = XLSX.read(e.target.result, {type:'array'});
-        const ws = wb.Sheets[wb.SheetNames[0]];
-        const aoa = XLSX.utils.sheet_to_json(ws, {header:1, defval:''});
+        let aoa;
+        if(isCsv){
+          const text = new TextDecoder('utf-8').decode(new Uint8Array(e.target.result));
+          aoa = parseCSV(text);
+        }else{
+          const wb = XLSX.read(e.target.result, {type:'array'});
+          const ws = wb.Sheets[wb.SheetNames[0]];
+          aoa = XLSX.utils.sheet_to_json(ws, {header:1, defval:''});
+        }
         const rows = parseSheet(aoa);
         filesData.push({name:file.name, rows});
       }catch(err){
@@ -273,30 +303,4 @@ function render(){
       th+='</tr>';
     });
   });
-  th+='</tbody></table>';
-  $('listTable').innerHTML=th;
-
-  const today=new Date().toLocaleDateString('ja-JP');
-  $('meta').textContent=`作成日: ${today}　／　発送先: ${groups.length} 件　明細: ${totalLines} 件　総個数: ${totalQty} 個　（読込ファイル: ${filesData.map(f=>f.name).join(', ')}）`;
-
-  $('emptyMsg').style.display='none';
-  $('output').style.display='block';
-  $('printBtn').disabled=false;
-}
-
-function renderFileList(){
-  const el=$('fileList');
-  if(!filesData.length){ el.innerHTML=''; return; }
-  el.innerHTML = filesData.map((f,i)=>
-    `<span class="f">📄 ${esc(f.name)} <small>(${f.rows.length}件)</small> <button data-i="${i}" title="削除">×</button></span>`
-  ).join('');
-  el.querySelectorAll('button').forEach(b=>b.addEventListener('click',e=>{
-    filesData.splice(+e.target.dataset.i,1); renderFileList();
-    if(filesData.length) render(); else $('clearBtn').click();
-  }));
-}
-
-function esc(s){ return String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
-</script>
-</body>
-</html>
+  th+='</tbo
