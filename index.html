@@ -303,4 +303,30 @@ function render(){
       th+='</tr>';
     });
   });
-  th+='</tbo
+  th+='</tbody></table>';
+  $('listTable').innerHTML=th;
+
+  const today=new Date().toLocaleDateString('ja-JP');
+  $('meta').textContent=`作成日: ${today}　／　発送先: ${groups.length} 件　明細: ${totalLines} 件　総個数: ${totalQty} 個　（読込ファイル: ${filesData.map(f=>f.name).join(', ')}）`;
+
+  $('emptyMsg').style.display='none';
+  $('output').style.display='block';
+  $('printBtn').disabled=false;
+}
+
+function renderFileList(){
+  const el=$('fileList');
+  if(!filesData.length){ el.innerHTML=''; return; }
+  el.innerHTML = filesData.map((f,i)=>
+    `<span class="f">📄 ${esc(f.name)} <small>(${f.rows.length}件)</small> <button data-i="${i}" title="削除">×</button></span>`
+  ).join('');
+  el.querySelectorAll('button').forEach(b=>b.addEventListener('click',e=>{
+    filesData.splice(+e.target.dataset.i,1); renderFileList();
+    if(filesData.length) render(); else $('clearBtn').click();
+  }));
+}
+
+function esc(s){ return String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+</script>
+</body>
+</html>
