@@ -47,13 +47,16 @@
   table{border-collapse:collapse; width:100%; font-size:12px;}
   th,td{border:1px solid var(--line); padding:4px 6px; vertical-align:middle; text-align:left;}
   thead th{background:var(--blue-l);}
-  tbody tr:nth-child(even){background:var(--blue-xl);}
+  .sumtbl tbody tr:nth-child(even){background:var(--blue-xl);}
   td.c,th.c{text-align:center;}
   .sumtbl td, .sumtbl th{padding:4px 8px;}
   h2.sec{font-size:14px; margin:18px 0 8px; border-left:5px solid var(--blue); padding-left:8px;}
   .empty{color:var(--gray); text-align:center; padding:30px;}
   .prodname{color:var(--gray); font-size:11px;}
   td.ord{font-variant-numeric:tabular-nums; word-break:break-all; font-size:11px; color:#333;}
+  th.trackh{width:110px;}
+  td.track{min-width:110px; background:#fff;}
+  tbody tr.grp td{border-top:2px solid #8aa9c8;}
   .print-head{display:none;}
   @media print{
     body{background:#fff; font-size:11px;}
@@ -245,18 +248,36 @@ function render(){
   sh+='</tbody></table>';
   $('summary').innerHTML=sh;
 
-  // main table : 注文ID → 宛名 → 〒・住所 → 商品名 → 個数
-  let th='<table><thead><tr><th class="c">No</th><th>注文ID</th><th>宛名</th><th>〒・住所</th><th>商品名</th><th class="c">個数</th></tr></thead><tbody>';
-  recs.forEach((r,i)=>{
-    const addr = (fmtZip(r.zip,true) + ' ' + r.addr).trim();
-    th+=`<tr><td class="c">${i+1}</td><td class="ord">${esc(r.order)}</td><td>${esc(r.name)}</td>`+
-        `<td>${esc(addr)}</td><td>${esc(r.product)}</td><td class="c">${esc(r.qty)}</td></tr>`;
+  // 同一宛先（宛名＋〒＋住所）でまとめる（読み込み順を保持）
+  const groups=[]; const gmap={};
+  recs.forEach(r=>{
+    const key=r.name+'|'+r.zip+'|'+r.addr;
+    if(!(key in gmap)){ gmap[key]=groups.length; groups.push({name:r.name, zip:r.zip, addr:r.addr, items:[]}); }
+    groups[gmap[key]].items.push(r);
+  });
+
+  // main table : No | 宛名 | 〒・住所 | 注文ID | 商品名 | 個数 | 追跡番号
+  let th='<table><thead><tr><th class="c">No</th><th>宛名</th><th>〒・住所</th><th>注文ID</th><th>商品名</th><th class="c">個数</th><th class="trackh">追跡番号</th></tr></thead><tbody>';
+  groups.forEach((gp,gi)=>{
+    const n=gp.items.length;
+    const addr=(fmtZip(gp.zip,true)+' '+gp.addr).trim();
+    gp.items.forEach((r,li)=>{
+      th+= (li===0? '<tr class="grp">' : '<tr>');
+      if(li===0){
+        th+=`<td class="c" rowspan="${n}">${gi+1}</td>`+
+            `<td rowspan="${n}">${esc(gp.name)}</td>`+
+            `<td rowspan="${n}">${esc(addr)}</td>`;
+      }
+      th+=`<td class="ord">${esc(r.order)}</td><td>${esc(r.product)}</td><td class="c">${esc(r.qty)}</td>`;
+      if(li===0) th+=`<td class="track" rowspan="${n}"></td>`;
+      th+='</tr>';
+    });
   });
   th+='</tbody></table>';
   $('listTable').innerHTML=th;
 
   const today=new Date().toLocaleDateString('ja-JP');
-  $('meta').textContent=`作成日: ${today}　／　総注文明細: ${totalLines} 件　総個数: ${totalQty} 個　（読込ファイル: ${filesData.map(f=>f.name).join(', ')}）`;
+  $('meta').textContent=`作成日: ${today}　／　発送先: ${groups.length} 件　明細: ${totalLines} 件　総個数: ${totalQty} 個　（読込ファイル: ${filesData.map(f=>f.name).join(', ')}）`;
 
   $('emptyMsg').style.display='none';
   $('output').style.display='block';
