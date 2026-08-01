@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>発送リスト作成ツール</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
 <style>
   :root{
     --blue:#2b6cb0; --blue-l:#d5e5f5; --blue-xl:#f4f8fc;
@@ -77,14 +78,14 @@
 
   <div class="noprint">
     <h1>発送リスト作成ツール</h1>
-    <div class="sub">TikTok Shop の注文エクスポート（Excel / CSV）を読み込んで、宛名・住所・商品・個数の一覧を作り、そのまま印刷できます。データはブラウザ内だけで処理され、どこにも送信されません。</div>
+    <div class="sub">TikTok Shop の注文エクスポート（Excel / CSV）や Amazon の納品書（PDF）を読み込んで、宛名・住所・商品・個数の一覧を作り、そのまま印刷できます。データはブラウザ内だけで処理され、どこにも送信されません。</div>
 
     <div class="panel">
       <div class="drop" id="drop">
         <b>ファイルをドラッグ＆ドロップ</b>、またはクリックして選択<br>
-        <small>.xlsx / .xls / .csv（複数選択・追加読み込みOK）</small>
+        <small>.xlsx / .xls / .csv / .pdf（複数選択・追加読み込みOK）</small>
       </div>
-      <input type="file" id="fileInput" multiple accept=".xlsx,.xls,.csv">
+      <input type="file" id="fileInput" multiple accept=".xlsx,.xls,.csv,.pdf">
       <div class="files" id="fileList"></div>
 
       <div class="btns">
@@ -119,7 +120,11 @@ const SKU_SHORT = {
   'belt01':'メンズベルト',
   'belt02':'メンズベルト',
   'ri_wa01':'二つ折り財布',
+  'PB-RIU-FBA-001-L111':'姿勢サポーター', // Amazon
 };
+
+// pdf.js のワーカー設定
+if(window.pdfjsLib){ pdfjsLib.GlobalWorkerOptions.workerSrc='https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js'; }
 
 let filesData = []; // {name, rows:[{...}]}
 
@@ -163,33 +168,83 @@ function parseCSV(text){
   return rows;
 }
 
-function handleFiles(fileList){
+async function handleFiles(fileList){
   const arr = Array.from(fileList);
-  let pending = arr.length;
-  if(!pending) return;
-  arr.forEach(file=>{
-    const isCsv = /\.csv$/i.test(file.name);
-    const reader = new FileReader();
-    reader.onload = e=>{
-      try{
-        let aoa;
-        if(isCsv){
-          const text = new TextDecoder('utf-8').decode(new Uint8Array(e.target.result));
-          aoa = parseCSV(text);
-        }else{
-          const wb = XLSX.read(e.target.result, {type:'array'});
-          const ws = wb.Sheets[wb.SheetNames[0]];
-          aoa = XLSX.utils.sheet_to_json(ws, {header:1, defval:''});
-        }
-        const rows = parseSheet(aoa);
-        filesData.push({name:file.name, rows});
-      }catch(err){
-        alert('読み込みエラー: '+file.name+'\n'+err.message);
+  if(!arr.length) return;
+  for(const file of arr){
+    try{
+      const buf = await file.arrayBuffer();
+      let rows;
+      if(/\.pdf$/i.test(file.name)){
+        rows = await parsePDF(buf);
+      }else if(/\.csv$/i.test(file.name)){
+        const text = new TextDecoder('utf-8').decode(new Uint8Array(buf));
+        rows = parseSheet(parseCSV(text));
+      }else{
+        const wb = XLSX.read(new Uint8Array(buf), {type:'array'});
+        const ws = wb.Sheets[wb.SheetNames[0]];
+        rows = parseSheet(XLSX.utils.sheet_to_json(ws, {header:1, defval:''}));
       }
-      if(--pending===0){ renderFileList(); $('genBtn').disabled=false; render(); }
-    };
-    reader.readAsArrayBuffer(file);
-  });
+      filesData.push({name:file.name, rows});
+    }catch(err){
+      alert('読み込みエラー: '+file.name+'\n'+err.message);
+    }
+  }
+  renderFileList(); $('genBtn').disabled=false; render();
+}
+
+// Amazon 納品書PDF（1ページ＝1注文）を解析
+async function parsePDF(buf){
+  if(!window.pdfjsLib) throw new Error('PDFライブラリの読み込みに失敗しました');
+  const pdf = await pdfjsLib.getDocument({data:new Uint8Array(buf)}).promise;
+  const rows=[];
+  for(let p=1;p<=pdf.numPages;p++){
+    const page = await pdf.getPage(p);
+    const tc = await page.getTextContent();
+    // 同じ高さ(y)の文字をまとめて1行に、上から下へ並べる
+    const map={};
+    tc.items.forEach(it=>{
+      if(it.str===undefined) return;
+      const k=Math.round(it.transform[5]);
+      (map[k]=map[k]||[]).push({s:it.str,x:it.transform[4]});
+    });
+    const lines=Object.keys(map).map(Number).sort((a,b)=>b-a)
+      .map(y=>map[y].sort((a,b)=>a.x-b.x).map(i=>i.s).join(''))
+      .map(s=>s.replace(/　/g,' ').replace(/\s+/g,' ').trim())
+      .filter(s=>s);
+    const rec=parseAmazonPage(lines);
+    if(rec) rows.push(rec);
+  }
+  return rows;
+}
+
+function parseAmazonPage(lines){
+  const text=lines.join('\n');
+  const om=text.match(/注文番号[:：]\s*([0-9][0-9\-]+)/);
+  const order = om ? om[1] : '';
+  // 最初に現れる郵便番号（＝上部の宛先ブロック）を基点にする
+  let zi=-1, zip='';
+  for(let i=0;i<lines.length;i++){
+    const m=lines[i].match(/^〒?\s*(\d{3}-?\d{4})$/);
+    if(m){ zip=m[1]; zi=i; break; }
+  }
+  let name='', addrParts=[];
+  if(zi>=0){
+    for(let j=zi+1;j<lines.length;j++){
+      const l=lines[j];
+      if(/様\s*$/.test(l)){ name=l.replace(/\s*様\s*$/,'').trim(); break; }
+      if(/^(注文日|配送方法|購入者|出品者|注文番号|発送先|お届け先|数量|Amazon)/.test(l)) continue;
+      addrParts.push(l);
+    }
+  }
+  const addr=addrParts.join('');
+  const skm=text.match(/SKU[:：]\s*([A-Za-z0-9][A-Za-z0-9\-_.]*)/);
+  const sku=skm ? skm[1] : '';
+  const pnm=lines.find(l=>l.includes('【')) || '';
+  const qm=text.match(/(\d+)\s*【/);
+  const qty=qm ? qm[1] : '1';
+  if(!order && !zip && !name) return null;
+  return {order, name, zip, addr, tel:'', sku, fullname:pnm, variation:'', qty};
 }
 
 // find header row (contains 受取人 or 注文ID), data starts after description row
@@ -254,7 +309,7 @@ function fmtZip(z, hyphen){
 function render(){
   let recs=[];
   filesData.forEach((f,fi)=>{
-    const src = f.name.replace(/\.(xlsx|xls|csv)$/i,'');
+    const src = f.name.replace(/\.(xlsx|xls|csv|pdf)$/i,'');
     f.rows.forEach((r,ri)=>recs.push({...r, src, fileIdx:fi, rowIdx:ri, product:shortName(r)}));
   });
 
