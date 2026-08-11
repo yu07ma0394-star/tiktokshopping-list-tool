@@ -297,12 +297,28 @@ async function parsePDF(buf){
     });
     const lines=Object.keys(map).map(Number).sort((a,b)=>b-a)
       .map(y=>map[y].sort((a,b)=>a.x-b.x).map(i=>i.s).join(''))
-      .map(s=>s.replace(/　/g,' ').replace(/\s+/g,' ').trim())
+      .map(s=>normalizeJp(s).replace(/　/g,' ').replace(/\s+/g,' ').trim())
       .filter(s=>s);
     const rec=parseAmazonPage(lines);
     if(rec) rows.push(rec);
   }
   return rows;
+}
+
+// 宛名の決定：発送先ラベルの氏名が壊れていることがあるので購入者名と突き合わせる
+function jpCharCount(s){ return (String(s).match(/[぀-ヿ一-鿿]/g)||[]).length; }
+function pickName(shipName, buyerName){
+  const ship = String(shipName||'').trim();
+  const buyer = String(buyerName||'').trim();
+  if(!buyer) return ship;
+  if(!ship) return buyer;
+  // 発送先の氏名が日本語として成立していない（例：「t」）なら購入者名を使う
+  if(jpCharCount(ship) < 2) return buyer;
+  // どちらかがもう一方を含むなら、情報量の多い方（例：購入者「時吉」／発送先「時吉 保志」）
+  const a = ship.replace(/\s/g,''), b = buyer.replace(/\s/g,'');
+  if(a.includes(b) || b.includes(a)) return (a.length >= b.length) ? ship : buyer;
+  // 全く別人に見える場合は購入者名を優先
+  return buyer;
 }
 
 function parseAmazonPage(lines){
@@ -315,15 +331,20 @@ function parseAmazonPage(lines){
     const m=lines[i].match(/^〒?\s*(\d{3}-?\d{4})$/);
     if(m){ zip=m[1]; zi=i; break; }
   }
-  let name='', addrParts=[];
+  let shipName='', addrParts=[];
   if(zi>=0){
     for(let j=zi+1;j<lines.length;j++){
       const l=lines[j];
-      if(/様\s*$/.test(l)){ name=l.replace(/\s*様\s*$/,'').trim(); break; }
+      if(/様\s*$/.test(l)){ shipName=l.replace(/\s*様\s*$/,'').trim(); break; }
       if(/^(注文日|配送方法|購入者|出品者|注文番号|発送先|お届け先|数量|Amazon)/.test(l)) continue;
       addrParts.push(l);
     }
   }
+
+  // 「購入者の名前:山口悠人様」から購入者名を取る
+  const bm = text.match(/購入者の名前[:：]\s*(.+?)\s*様/);
+  const buyerName = bm ? bm[1].trim() : '';
+  const name = pickName(shipName, buyerName);
   const addr=addrParts.join('');
   const skm=text.match(/SKU[:：]\s*([A-Za-z0-9][A-Za-z0-9\-_.]*)/);
   const sku=skm ? skm[1] : '';
@@ -343,11 +364,32 @@ function parseAmazonPage(lines){
     if(m2){ if(!qty) qty = m2[1]; pnm = m2[2].trim(); }
   }
   if(!pnm) pnm = lines.find(l=>l.includes('【')) || '';
+  pnm = pnm.replace(/^\d+\s+/,'').replace(/[¥￥][\d,]+.*$/,'').trim();
   if(!qty) qty = '1';
   if(!order && !zip && !name) return null;
   const sp = splitJpAddress(addr);
   return {order, name, zip, addr, addr1:sp.addr1, addr2:sp.addr2, addr3:sp.addr3,
           tel:'', sku, fullname:pnm, variation:'', qty, weight:'', source:'Amazon'};
+}
+
+// ===== PDFの文字化け対策 =====
+// Amazonの納品書は「文」「山」「口」などを康熙部首(U+2F00〜)やCJK部首補助(U+2E80〜)の
+// 別コードで埋め込んでいる。見た目は同じでもShift_JISに変換できず「?」になるため通常の漢字へ直す。
+const RADICAL_FIX = {
+  '⺦':'丬','⺰':'纟','⻅':'见','⻈':'讠','⻉':'贝',
+  '⻋':'车','⻐':'钅','⻓':'长','⻔':'门','⻙':'韦',
+  '⻚':'页','⻛':'风','⻜':'飞','⻠':'饣','⻢':'马',
+  '⻥':'鱼','⻦':'鸟','⻧':'卤','⻨':'麦','⻩':'黄',
+  '⻪':'黾','⻫':'斉','⻬':'齐','⻭':'歯','⻮':'齿',
+  '⻯':'竜','⻰':'龙','⻲':'亀','⻳':'龟',
+};
+function normalizeJp(str){
+  let t = String(str==null?'':str);
+  // 康熙部首(U+2F00〜U+2FD5)や全角英数はNFKCで通常の文字に戻る
+  try{ t = t.normalize('NFKC'); }catch(e){}
+  // NFKCで戻らないCJK部首補助を個別に置換
+  t = t.replace(/[⺀-⻳]/g, c => RADICAL_FIX[c] || c);
+  return t;
 }
 
 // ===== 住所文字列を「都道府県+市区町村+町名 / 番地 / 建物」に自動分割 =====
@@ -665,6 +707,7 @@ function fmtTel(t){
 function contentName(r){
   if(SKU_SHORT[r.sku]) return SKU_SHORT[r.sku];
   let s = String(r.fullname||'')
+    .replace(/[¥￥][\d,]+.*$/,'')      // 末尾の金額を除去
     .replace(/【[^】]*】/g,'')          // 【累計10万袋突破】などの惹句を除去
     .replace(/[（(][^)）]*[)）]/g,'')
     .replace(/[＂"”“]/g,'')
@@ -808,6 +851,21 @@ function buildGenericRows(recs, method){
   return {rows, warns};
 }
 
+// Shift_JISで表現できない文字を洗い出す（クリックポスト出力時の文字化け防止）
+function findUnencodable(rows){
+  if(!window.Encoding) return [];
+  const bad = new Set();
+  rows.forEach(row=>row.forEach(cell=>{
+    const str = String(cell==null?'':cell);
+    for(const ch of str){
+      if(ch.charCodeAt(0) < 128 || bad.has(ch)) continue;
+      const conv = Encoding.convert(Encoding.stringToCode(ch), {to:'SJIS', from:'UNICODE'});
+      if(conv.length===1 && conv[0]===0x3F && ch!=='?') bad.add(ch);
+    }
+  }));
+  return [...bad];
+}
+
 function downloadCSV(text, filename, enc){
   let blob;
   if(enc==='sjis' && window.Encoding){
@@ -864,6 +922,9 @@ function exportFmt(){
       const suffix = chunks.length>1 ? `_${i+1}` : '';
       setTimeout(()=>downloadCSV(csv, `クリックポスト_${ts}${suffix}.csv`, enc), i*400);
     });
+
+    const bad = (enc==='sjis') ? findUnencodable(rows) : [];
+    if(bad.length) warns.push(`Shift_JISで表現できない文字が含まれています（${bad.join(' ')}）。取込先で「?」になる場合があります`);
 
     let html = `<b>クリックポスト用CSVを${chunks.length}ファイル出力しました（${rows.length} 件）</b>`;
     if(chunks.length>1) html += `1ファイル${CP_MAX_ROWS}件までのため分割しています。<br>`;
