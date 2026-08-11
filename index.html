@@ -6,6 +6,7 @@
 <title>発送リスト作成ツール</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/encoding-japanese/2.0.0/encoding.min.js"></script>
 <style>
   :root{
     --blue:#2b6cb0; --blue-l:#d5e5f5; --blue-xl:#f4f8fc;
@@ -45,6 +46,11 @@
   button.act.ghost{background:#fff; color:var(--blue); border:1.5px solid var(--blue);}
   button.act:disabled{background:#bbb; cursor:not-allowed;}
   .meta{font-size:13px; color:var(--gray); margin:4px 0 12px;}
+  .fmtbox{margin-top:16px; padding-top:14px; border-top:1px dashed #d5d5d5;}
+  .fmttitle{font-size:13px; font-weight:bold; color:var(--blue); margin-bottom:2px;}
+  .fmtbox .controls{margin-top:8px; gap:14px;}
+  .fmtbox select{padding:6px 8px; border:1px solid var(--line); border-radius:6px; font-size:13px; background:#fff;}
+  .fmtnote{font-size:12px; color:var(--gray); margin-top:8px;}
   table{border-collapse:collapse; width:100%; font-size:12px;}
   th,td{border:1px solid var(--line); padding:4px 6px; vertical-align:middle; text-align:left;}
   thead th{background:var(--blue-l);}
@@ -93,6 +99,33 @@
         <button class="act ghost" id="printBtn" disabled>🖨 印刷 / PDF保存</button>
         <button class="act ghost" id="clearBtn">クリア</button>
       </div>
+
+      <div class="fmtbox">
+        <div class="fmttitle">送り状フォーマット出力</div>
+        <div class="controls">
+          <label>配送方法
+            <select id="shipMethod">
+              <option>クリックポスト</option>
+              <option>ゆうパケット</option>
+              <option>ゆうパケットポスト</option>
+              <option>ゆうパック</option>
+              <option>ネコポス</option>
+              <option>宅急便コンパクト</option>
+              <option>宅急便</option>
+              <option>飛脚宅配便（佐川）</option>
+              <option>定形外郵便</option>
+            </select>
+          </label>
+          <label>文字コード
+            <select id="csvEnc">
+              <option value="sjis">Shift_JIS（送り状システム向け）</option>
+              <option value="utf8">UTF-8 BOM付き（Excel向け）</option>
+            </select>
+          </label>
+          <button class="act" id="fmtBtn" disabled>📄 送り状FMT作成（CSV）</button>
+        </div>
+        <div class="fmtnote">明細1行＝CSV1行で出力します。取り込み先でエラーが出る場合は文字コードを切り替えてください。</div>
+      </div>
     </div>
   </div>
 
@@ -127,6 +160,7 @@ const SKU_SHORT = {
 if(window.pdfjsLib){ pdfjsLib.GlobalWorkerOptions.workerSrc='https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js'; }
 
 let filesData = []; // {name, rows:[{...}]}
+let currentRecs = []; // 直近に作成したリストの明細（送り状FMT出力用）
 
 const $ = id => document.getElementById(id);
 const drop = $('drop'), fileInput = $('fileInput');
@@ -139,9 +173,11 @@ fileInput.addEventListener('change', ev=>handleFiles(ev.target.files));
 
 $('genBtn').addEventListener('click', render);
 $('printBtn').addEventListener('click', ()=>window.print());
+$('fmtBtn').addEventListener('click', exportFmt);
 $('clearBtn').addEventListener('click', ()=>{
-  filesData=[]; renderFileList(); $('output').style.display='none';
-  $('emptyMsg').style.display='block'; $('genBtn').disabled=true; $('printBtn').disabled=true;
+  filesData=[]; currentRecs=[]; renderFileList(); $('output').style.display='none';
+  $('emptyMsg').style.display='block'; $('emptyMsg').textContent='ファイルを読み込むとここに一覧が表示されます。';
+  $('genBtn').disabled=true; $('printBtn').disabled=true; $('fmtBtn').disabled=true;
   fileInput.value='';
 });
 
@@ -244,7 +280,7 @@ function parseAmazonPage(lines){
   const qm=text.match(/(\d+)\s*【/);
   const qty=qm ? qm[1] : '1';
   if(!order && !zip && !name) return null;
-  return {order, name, zip, addr, tel:'', sku, fullname:pnm, variation:'', qty};
+  return {order, name, zip, addr, addr1:addr, addr2:'', addr3:'', tel:'', sku, fullname:pnm, variation:'', qty};
 }
 
 // find header row (contains 受取人 or 注文ID), data starts after description row
@@ -277,11 +313,15 @@ function parseSheet(aoa){
     if(!/^\d{6,}$/.test(order)) continue;
     const addr = ['都道府県','市区町村','町名','詳細住所1','詳細住所2']
       .map(k=>g(row,k)).filter(Boolean).join('');
+    // 送り状FMT用の分割住所
+    const addr1 = ['都道府県','市区町村','町名'].map(k=>g(row,k)).filter(Boolean).join('');
+    const addr2 = g(row,'詳細住所1');
+    const addr3 = g(row,'詳細住所2');
     out.push({
       order,
       name: g(row,'受取人'),
       zip: g(row,'郵便番号'),
-      addr,
+      addr, addr1, addr2, addr3,
       tel: g(row,'電話番号'),
       sku: g(row,'セラーSKU'),
       fullname: g(row,'商品名'),
@@ -314,12 +354,14 @@ function render(){
   });
 
   if(!recs.length){
+    currentRecs=[]; $('fmtBtn').disabled=true;
     $('output').style.display='none'; $('emptyMsg').style.display='block';
     $('emptyMsg').textContent='有効な注文データが見つかりませんでした。'; return;
   }
 
   // ファイル順（読み込んだ順・行順を保持）
   recs.sort((a,b)=> a.fileIdx-b.fileIdx || a.rowIdx-b.rowIdx);
+  currentRecs = recs;
 
   const totalLines = recs.length;
   const totalQty = recs.reduce((s,r)=>s+(parseInt(r.qty)||1),0);
@@ -367,6 +409,92 @@ function render(){
   $('emptyMsg').style.display='none';
   $('output').style.display='block';
   $('printBtn').disabled=false;
+  $('fmtBtn').disabled=false;
+}
+
+/* ===== 送り状フォーマット（CSV）出力 ===== */
+
+// 送り状テンプレの列順
+const FMT_HEADER = ['配送方法','郵便番号','お届け先氏名','敬称',
+  '住所1行目（都道府県・市区町村）','住所2行目（番地）','住所3行目（建物・部屋番号）',
+  '住所4行目（任意）','電話番号（佐川は必須）','内容品','出力ステータス'];
+
+// 郵便番号：数字のみ7桁（ハイフンなし）
+function fmtZipPlain(z){
+  const d = String(z||'').replace(/[^0-9]/g,'');
+  return d;
+}
+
+// 電話番号：(+81)09012345678 → 09012345678 / 全角も半角化
+function fmtTel(t){
+  let s = String(t||'').replace(/[０-９＋]/g, c=>String.fromCharCode(c.charCodeAt(0)-0xFEE0));
+  s = s.replace(/[^0-9+]/g,'');       // (+81)07033190310 → +8107033190310
+  s = s.replace(/^\+?81/,'');         // 国番号81を除去
+  s = s.replace(/[^0-9]/g,'');
+  if(!s) return '';
+  if(s[0]!=='0') s = '0'+s;           // 先頭0を補う
+  return s;
+}
+
+// 内容品：短縮商品名（個数2以上なら ×n）
+function fmtContent(r){
+  const q = parseInt(r.qty)||1;
+  return q>1 ? `${r.product}×${q}` : r.product;
+}
+
+function fmtRow(r, method){
+  return [
+    method,
+    fmtZipPlain(r.zip),
+    r.name || '',
+    '様',
+    r.addr1 || r.addr || '',
+    r.addr2 || '',
+    r.addr3 || '',
+    '',
+    fmtTel(r.tel),
+    fmtContent(r),
+    ''
+  ];
+}
+
+function csvCell(v){
+  const s = String(v==null?'':v);
+  return /[",\r\n]/.test(s) ? '"'+s.replace(/"/g,'""')+'"' : s;
+}
+
+function buildFmtCSV(recs, method){
+  const lines = [FMT_HEADER, ...recs.map(r=>fmtRow(r, method))];
+  return lines.map(row=>row.map(csvCell).join(',')).join('\r\n')+'\r\n';
+}
+
+function downloadCSV(text, filename, enc){
+  let blob;
+  if(enc==='sjis' && window.Encoding){
+    const sjis = Encoding.convert(Encoding.stringToCode(text), {to:'SJIS', from:'UNICODE'});
+    blob = new Blob([new Uint8Array(sjis)], {type:'text/csv'});
+  }else{
+    blob = new Blob(['﻿'+text], {type:'text/csv;charset=utf-8'});
+  }
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = filename;
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  setTimeout(()=>URL.revokeObjectURL(url), 1000);
+}
+
+function exportFmt(){
+  if(!currentRecs.length){ alert('先に「リストを作成」してください。'); return; }
+  const method = $('shipMethod').value;
+  let enc = $('csvEnc').value;
+  if(enc==='sjis' && !window.Encoding){
+    alert('Shift_JIS変換ライブラリが読み込めなかったため、UTF-8（BOM付き）で出力します。');
+    enc = 'utf8';
+  }
+  const csv = buildFmtCSV(currentRecs, method);
+  const d = new Date();
+  const ymd = d.getFullYear()+String(d.getMonth()+1).padStart(2,'0')+String(d.getDate()).padStart(2,'0');
+  downloadCSV(csv, `送り状FMT_${ymd}.csv`, enc);
 }
 
 function renderFileList(){
