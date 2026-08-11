@@ -74,6 +74,15 @@
   td.chk .chkprint{display:none; font-size:12px;}
   tr.picked td{background:#eef5fd;}
   tr.unpicked td{color:#aaa;}
+  th.telh{width:120px;}
+  td.tel{padding:2px 4px;}
+  td.tel input{width:100%; font-size:11px; padding:3px 4px; border:1px solid var(--line);
+    border-radius:5px; font-variant-numeric:tabular-nums;}
+  td.tel input::placeholder{color:#c0392b;}
+  td.tel .telprint{display:none; font-size:11px;}
+  td.tel-none input{border-color:#e0a0a0; background:#fff5f5;}
+  td.tel-fill input{border-color:#8fce9f; background:#f2fbf5;}
+  td.tel-man  input{border-color:#f0c36d; background:#fffaf0;}
   th.wh{width:52px;}
   td.wt{text-align:right; font-size:11px; color:var(--gray); font-variant-numeric:tabular-nums;}
   .bulkrow{margin-top:12px; display:flex; flex-wrap:wrap; gap:8px; align-items:center;}
@@ -87,6 +96,7 @@
   .badge.cp{background:#dceaf9; color:#1c4f86;}
   .badge.sg{background:#fbe3cd; color:#8a4a08;}
   .badge.x{background:#e6e6e6; color:#666;}
+  .badge.ng{background:#fbdada; color:#8c2020;}
   tbody tr.grp td{border-top:2px solid #8aa9c8;}
   .print-head{display:none;}
   @media print{
@@ -101,6 +111,9 @@
     tr{page-break-inside:avoid;}
     td.chk input{display:none;}
     td.chk .chkprint{display:inline;}
+    td.tel input{display:none;}
+    td.tel .telprint{display:inline;}
+    td.tel-none,td.tel-fill,td.tel-man{background:#fff !important;}
     tr.picked td{background:#fff !important;}
     tr.unpicked{display:none;}
     @page{size:A4; margin:10mm;}
@@ -117,9 +130,9 @@
     <div class="panel">
       <div class="drop" id="drop">
         <b>ファイルをドラッグ＆ドロップ</b>、またはクリックして選択<br>
-        <small>.xlsx / .xls / .csv / .pdf（複数選択・追加読み込みOK）<br>TikTok Shop・Qoo10 の注文一覧、Amazon の納品書に対応</small>
+        <small>.xlsx / .xls / .csv / .tsv / .txt / .pdf（複数選択・追加読み込みOK）<br>TikTok Shop・Qoo10 の注文一覧、Amazon の納品書PDF・注文レポートに対応</small>
       </div>
-      <input type="file" id="fileInput" multiple accept=".xlsx,.xls,.csv,.pdf">
+      <input type="file" id="fileInput" multiple accept=".xlsx,.xls,.csv,.tsv,.txt,.pdf">
       <div class="files" id="fileList"></div>
 
       <div class="btns">
@@ -223,14 +236,23 @@ $('genBtn').addEventListener('click', render);
 $('printBtn').addEventListener('click', ()=>window.print());
 $('fmtBtn').addEventListener('click', exportFmt);
 $('clearBtn').addEventListener('click', ()=>{
-  filesData=[]; currentRecs=[]; currentGroups=[]; pickMap={}; renderFileList(); $('output').style.display='none';
+  filesData=[]; currentRecs=[]; currentGroups=[]; pickMap={}; telManual={}; telFilled=0; merged=0; renderFileList(); $('output').style.display='none';
   $('emptyMsg').style.display='block'; $('emptyMsg').textContent='ファイルを読み込むとここに一覧が表示されます。';
   $('genBtn').disabled=true; $('printBtn').disabled=true; $('fmtBtn').disabled=true;
   fileInput.value='';
 });
 
-// CSVを文字列のまま解析（数値・日付への自動変換をしない）。引用符・改行・エスケープ対応
-function parseCSV(text){
+// 区切り文字を自動判定（Amazonの注文レポートはタブ区切り）
+function detectDelimiter(text){
+  const head = text.split(/\r?\n/).slice(0,3).join('\n');
+  const tabs = (head.match(/\t/g)||[]).length;
+  const commas = (head.match(/,/g)||[]).length;
+  return tabs > commas ? '\t' : ',';
+}
+
+// CSV/TSVを文字列のまま解析（数値・日付への自動変換をしない）。引用符・改行・エスケープ対応
+function parseCSV(text, delim){
+  const D = delim || ',';
   if(text.charCodeAt(0)===0xFEFF) text=text.slice(1); // BOM除去
   const rows=[]; let row=[]; let field=''; let inQ=false; let i=0;
   while(i<text.length){
@@ -243,7 +265,7 @@ function parseCSV(text){
       field+=c; i++; continue;
     }
     if(c==='"'){ inQ=true; i++; continue; }
-    if(c===','){ row.push(field); field=''; i++; continue; }
+    if(c===D){ row.push(field); field=''; i++; continue; }
     if(c==='\r'){ i++; continue; }
     if(c==='\n'){ row.push(field); rows.push(row); row=[]; field=''; i++; continue; }
     field+=c; i++;
@@ -264,9 +286,9 @@ async function handleFiles(fileList){
       let rows;
       if(/\.pdf$/i.test(file.name)){
         rows = await parsePDF(buf);
-      }else if(/\.csv$/i.test(file.name)){
+      }else if(/\.(csv|tsv|txt)$/i.test(file.name)){
         const text = new TextDecoder('utf-8').decode(new Uint8Array(buf));
-        rows = parseSheet(parseCSV(text));
+        rows = parseSheet(parseCSV(text, detectDelimiter(text)));
       }else{
         const wb = XLSX.read(new Uint8Array(buf), {type:'array'});
         const ws = wb.Sheets[wb.SheetNames[0]];
@@ -430,8 +452,13 @@ function splitJpAddress(full){
 
 // ===== 注文一覧シートの解析（TikTok Shop / Qoo10 を自動判別） =====
 const SHEET_FORMATS = [
-  { platform:'TikTok', idCol:'注文ID',   needs:['受取人','数量'] },
-  { platform:'Qoo10',  idCol:'注文番号', needs:['受取人名','住所'] },
+  { platform:'TikTok', idCol:'注文ID',   needs:['受取人','数量'],     idRe:/^\d{6,}$/ },
+  { platform:'Qoo10',  idCol:'注文番号', needs:['受取人名','住所'],   idRe:/^\d{6,}$/ },
+  // Amazon セラーセントラルの注文レポート（タブ区切り／英語見出し）
+  { platform:'Amazon', idCol:'order-id', needs:['ship-phone-number','ship-postal-code','recipient-name'],
+    idRe:/^[\d-]{10,}$/ },
+  { platform:'Amazon', idCol:'amazon-order-id', needs:['ship-phone-number','ship-postal-code','recipient-name'],
+    idRe:/^[\d-]{10,}$/ },
 ];
 
 function detectFormat(row){
@@ -466,7 +493,7 @@ function parseSheet(aoa){
   const idIdx = col[fmt.idCol];
   if(idIdx!=null){
     const first = String(aoa[start] ? aoa[start][idIdx] : '').trim();
-    if(!/^\d{6,}/.test(first)) start = headerIdx+2;
+    if(!fmt.idRe.test(first)) start = headerIdx+2;
   }
 
   const out=[];
@@ -474,7 +501,31 @@ function parseSheet(aoa){
     const row = aoa[i];
     if(!row) continue;
     const order = g(row, fmt.idCol);
-    if(!/^\d{6,}$/.test(order)) continue;
+    if(!fmt.idRe.test(order)) continue;
+
+    if(fmt.platform==='Amazon'){
+      // 注文レポート：住所は 都道府県 / 市区町村 / 番地 / 建物 に分かれている
+      const state = g(row,'ship-state'), city = g(row,'ship-city');
+      const a1 = g(row,'ship-address-1'), a2 = g(row,'ship-address-2'), a3 = g(row,'ship-address-3');
+      const sp = splitJpAddress(state + city + a1);
+      out.push({
+        order,
+        name: g(row,'recipient-name') || g(row,'buyer-name'),
+        zip:  g(row,'ship-postal-code'),
+        addr: [state, city, a1, a2, a3].filter(Boolean).join(''),
+        addr1: sp.addr1,
+        addr2: sp.addr2,
+        addr3: [sp.addr3, a2, a3].filter(Boolean).join(' ').trim(),
+        tel:  g(row,'ship-phone-number') || g(row,'buyer-phone-number'),
+        sku:  g(row,'sku'),
+        fullname: g(row,'product-name'),
+        variation: '',
+        qty: g(row,'quantity-purchased') || g(row,'quantity') || '1',
+        weight: '',
+        source: 'Amazon',
+      });
+      continue;
+    }
 
     if(fmt.platform==='Qoo10'){
       // Qoo10は住所が1本の文字列なので分割する
@@ -540,6 +591,9 @@ function fmtZip(z, hyphen){
 
 // 宛先ごとのチェック状態を保持（key = 宛名|〒|住所）
 let pickMap = {};
+let telManual = {};   // 一覧で手入力した電話番号
+let telFilled = 0;    // 注文レポートから補完できた件数
+let merged = 0;       // 別ファイルの同一注文を統合した件数
 let currentGroups = [];
 
 function groupKey(r){ return r.name+'|'+r.zip+'|'+r.addr; }
@@ -556,6 +610,16 @@ function groupWeight(items){
   return w>0 ? (Math.round(w*100)/100) : null;
 }
 
+// 同じ注文の2件を1件にまとめる（空欄を埋め、氏名は情報量の多い方を採用）
+function mergeRecord(base, extra){
+  if(!fmtTel(base.tel) && fmtTel(extra.tel)){ base.tel = extra.tel; base.telFrom = 'report'; telFilled++; }
+  ['zip','addr','addr1','addr2','addr3','tel','sku','fullname','variation','weight'].forEach(k=>{
+    if(!String(base[k]||'').trim() && String(extra[k]||'').trim()) base[k] = extra[k];
+  });
+  base.name = pickName(base.name, extra.name);
+  base.product = shortName(base);
+}
+
 function render(){
   let recs=[];
   filesData.forEach((f,fi)=>{
@@ -570,6 +634,38 @@ function render(){
   }
 
   recs.sort((a,b)=> a.fileIdx-b.fileIdx || a.rowIdx-b.rowIdx);
+
+  // 納品書PDFと注文レポートのように、同じ注文が別ファイルから重複して入った場合は1件に統合する
+  // （同一ファイル内は統合しない＝1注文に複数商品があるケースを壊さないため）
+  merged = 0; telFilled = 0;
+  const seen = {};
+  const uniq = [];
+  recs.forEach(r=>{
+    const key = r.order + '|' + (r.sku||'');
+    const prev = seen[key];
+    if(prev && prev.fileIdx !== r.fileIdx){
+      mergeRecord(prev, r);
+      merged++;
+      return;
+    }
+    seen[key] = r;
+    uniq.push(r);
+  });
+  recs = uniq;
+
+  // 注文番号で電話番号を横断的に補完（納品書PDF ← 注文レポート）
+  const telByOrder = {};
+  recs.forEach(r=>{ const t = fmtTel(r.tel); if(t && !telByOrder[r.order]) telByOrder[r.order] = r.tel; });
+  recs.forEach(r=>{
+    if(!fmtTel(r.tel) && telByOrder[r.order]){ r.tel = telByOrder[r.order]; r.telFrom='report'; telFilled++; }
+  });
+
+  // 一覧で手入力された電話番号を最優先で反映
+  recs.forEach(r=>{
+    const manual = telManual[groupKey(r)];
+    if(manual){ r.tel = manual; r.telFrom='manual'; }
+  });
+
   currentRecs = recs;
 
   const totalLines = recs.length;
@@ -596,7 +692,7 @@ function render(){
   currentGroups = groups;
 
   let th='<table><thead><tr><th class="chkh"><input type="checkbox" id="chkAll"></th><th class="c">No</th>'+
-         '<th>宛名</th><th>〒・住所</th><th class="wh">重量</th>'+
+         '<th>宛名</th><th>〒・住所</th><th class="telh">電話番号</th><th class="wh">重量</th>'+
          '<th class="c">元</th><th>注文ID</th><th>商品名</th><th class="c">個数</th><th class="trackh">追跡番号</th></tr></thead><tbody>';
   groups.forEach((gp,gi)=>{
     const n=gp.items.length;
@@ -605,6 +701,10 @@ function render(){
     const w = groupWeight(gp.items);
     const box = `<input type="checkbox" class="pickbox" data-key="${esc(gp.key)}"${on?' checked':''}>`+
                 `<span class="chkprint">${on?'✓':''}</span>`;
+    const telSrc = gp.items.find(r=>fmtTel(r.tel));
+    const telVal = telSrc ? fmtTel(telSrc.tel) : '';
+    const telCls = !telVal ? 'tel-none' : (telSrc.telFrom==='report' ? 'tel-fill'
+                 : (telSrc.telFrom==='manual' ? 'tel-man' : ''));
     gp.items.forEach((r,li)=>{
       th+= (li===0 ? `<tr class="grp ${on?'picked':'unpicked'}">` : `<tr class="${on?'picked':'unpicked'}">`);
       if(li===0){
@@ -612,6 +712,9 @@ function render(){
             `<td class="c" rowspan="${n}">${gi+1}</td>`+
             `<td rowspan="${n}">${esc(gp.name)}</td>`+
             `<td rowspan="${n}">${esc(addr)}</td>`+
+            `<td class="tel ${telCls}" rowspan="${n}">`+
+              `<input type="text" class="telbox" data-key="${esc(gp.key)}" value="${esc(telVal)}" placeholder="未取得">`+
+              `<span class="telprint">${esc(telVal)}</span></td>`+
             `<td class="wt" rowspan="${n}">${w!=null ? w+'kg' : ''}</td>`;
       }
       th+=`<td class="c src">${esc(SRC_LABEL[r.source]||r.source||'')}</td>`+
@@ -622,6 +725,27 @@ function render(){
   });
   th+='</tbody></table>';
   $('listTable').innerHTML=th;
+
+  $('listTable').querySelectorAll('.telbox').forEach(box=>{
+    box.addEventListener('change', e=>{
+      const key = e.target.dataset.key;
+      const v = e.target.value.trim();
+      if(v) telManual[key] = v; else delete telManual[key];
+      // 該当宛先のレコードにその場で反映（再描画しないので入力欄からフォーカスが飛ばない）
+      currentRecs.forEach(r=>{
+        if(groupKey(r)!==key) return;
+        if(v){ r.tel = v; r.telFrom='manual'; }
+        else if(r.telFrom==='manual'){ r.tel=''; r.telFrom=''; }
+      });
+      const cell = e.target.closest('td');
+      cell.className = 'tel ' + (v ? 'tel-man' : 'tel-none');
+      const sp = cell.querySelector('.telprint');
+      if(sp) sp.textContent = fmtTel(v);
+      e.target.value = fmtTel(v);
+      updateCounts();
+      $('fmtWarn').style.display='none';
+    });
+  });
 
   $('listTable').querySelectorAll('.pickbox').forEach(box=>{
     box.addEventListener('change', e=>{
@@ -653,7 +777,9 @@ function render(){
   }
 
   const today=new Date().toLocaleDateString('ja-JP');
-  $('meta').textContent=`作成日: ${today}　／　発送先: ${groups.length} 件　明細: ${totalLines} 件　総個数: ${totalQty} 個　（読込ファイル: ${filesData.map(f=>f.name).join(', ')}）`;
+  $('meta').textContent=`作成日: ${today}　／　発送先: ${groups.length} 件　明細: ${totalLines} 件　総個数: ${totalQty} 個`
+    + (merged ? `　／　重複統合: ${merged} 件` : '')
+    + `　（読込ファイル: ${filesData.map(f=>f.name).join(', ')}）`;
 
   updateCounts();
   $('emptyMsg').style.display='none';
@@ -823,7 +949,7 @@ function buildSagawaRows(recs){
 
     if(zip.length!==7) warns.push(`${r.order}：郵便番号が7桁ではありません（${r.zip||'空欄'}）`);
     if(!name) warns.push(`${r.order}：お届け先氏名が空欄です`);
-    if(!tel) warns.push(`${r.order}：電話番号がありません（佐川は必須）${r.source==='Amazon'?'／Amazon納品書PDFには印字されないため手入力が必要です':''}`);
+    if(!tel) warns.push(`${r.order}：電話番号がありません（佐川は必須）${r.source==='Amazon'?'／セラーセントラルの注文レポートを一緒に読み込むか、一覧の電話番号欄に直接入力してください':''}`);
     if(overflow.length) warns.push(`${r.order}：住所が4欄に収まらず末尾を切り捨てました（${overflow.join(' / ')}）`);
 
     rows.push([zip, name, '様', lines[0], lines[1], lines[2], lines[3], tel, item]);
@@ -839,7 +965,7 @@ function buildGenericRows(recs, method){
     if(zip.length!==7) warns.push(`${r.order}：郵便番号が7桁ではありません（${r.zip||'空欄'}）`);
     if(!String(r.name||'').trim()) warns.push(`${r.order}：お届け先氏名が空欄です`);
     if(method==='佐川急便' && !tel){
-      warns.push(`${r.order}：電話番号がありません（佐川は必須）${r.source==='Amazon'?'／Amazon納品書PDFには電話番号が印字されないため手入力が必要です':''}`);
+      warns.push(`${r.order}：電話番号がありません（佐川は必須）${r.source==='Amazon'?'／セラーセントラルの注文レポートを一緒に読み込むか、一覧の電話番号欄に直接入力してください':''}`);
     }
     if(!r.addr2 && r.source==='Amazon') warns.push(`${r.order}：番地を自動判別できませんでした（住所1行目に丸ごと入っています）`);
     rows.push([
@@ -993,8 +1119,11 @@ function updateCounts(){
   if(!currentGroups.length){ el.innerHTML=''; return; }
   const on = currentGroups.filter(gp=>pickMap[gp.key]!==false).length;
   const off = currentGroups.length - on;
+  const noTel = currentGroups.filter(gp=>!gp.items.some(r=>fmtTel(r.tel))).length;
   el.innerHTML = `<span class="badge cp">選択中 <b>${on}</b> 件</span>`+
-                 (off ? `<span class="badge x">未選択 <b>${off}</b> 件</span>` : '');
+                 (off ? `<span class="badge x">未選択 <b>${off}</b> 件</span>` : '')+
+                 (telFilled ? `<span class="badge sg">電話番号を補完 <b>${telFilled}</b> 件</span>` : '')+
+                 (noTel ? `<span class="badge ng">電話番号なし <b>${noTel}</b> 件</span>` : '');
 }
 
 document.querySelectorAll('button[data-bulk]').forEach(btn=>{
