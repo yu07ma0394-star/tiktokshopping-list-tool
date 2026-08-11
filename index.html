@@ -50,7 +50,11 @@
   .fmttitle{font-size:13px; font-weight:bold; color:var(--blue); margin-bottom:2px;}
   .fmtbox .controls{margin-top:8px; gap:14px;}
   .fmtbox select{padding:6px 8px; border:1px solid var(--line); border-radius:6px; font-size:13px; background:#fff;}
-  .fmtnote{font-size:12px; color:var(--gray); margin-top:8px;}
+  .fmtnote{font-size:12px; color:var(--gray); margin-top:8px; line-height:1.6;}
+  .fmtwarn{margin-top:10px; padding:10px 12px; border-radius:8px; font-size:12px; line-height:1.7;
+    background:#fff7e6; border:1px solid #f0c36d; color:#7a5200;}
+  .fmtwarn.ok{background:#eefaf1; border-color:#8fce9f; color:#1f6b38;}
+  .fmtwarn b{display:block; margin-bottom:4px;}
   table{border-collapse:collapse; width:100%; font-size:12px;}
   th,td{border:1px solid var(--line); padding:4px 6px; vertical-align:middle; text-align:left;}
   thead th{background:var(--blue-l);}
@@ -63,6 +67,7 @@
   td.ord{font-variant-numeric:tabular-nums; word-break:break-all; font-size:11px; color:#333;}
   th.trackh{width:110px;}
   td.track{min-width:110px; background:#fff;}
+  td.src{font-size:10px; color:var(--gray); width:34px;}
   tbody tr.grp td{border-top:2px solid #8aa9c8;}
   .print-head{display:none;}
   @media print{
@@ -103,28 +108,28 @@
       <div class="fmtbox">
         <div class="fmttitle">送り状フォーマット出力</div>
         <div class="controls">
-          <label>配送方法
+          <label>出力形式
+            <select id="fmtMode">
+              <option value="clickpost">クリックポスト 公式CSV（直接取込）</option>
+              <option value="generic">手入力シート貼付用CSV（11列）</option>
+            </select>
+          </label>
+          <label id="methodWrap" style="display:none;">配送方法
             <select id="shipMethod">
               <option>クリックポスト</option>
-              <option>ゆうパケット</option>
-              <option>ゆうパケットポスト</option>
-              <option>ゆうパック</option>
-              <option>ネコポス</option>
-              <option>宅急便コンパクト</option>
-              <option>宅急便</option>
-              <option>飛脚宅配便（佐川）</option>
-              <option>定形外郵便</option>
+              <option>佐川急便</option>
             </select>
           </label>
           <label>文字コード
             <select id="csvEnc">
-              <option value="sjis">Shift_JIS（送り状システム向け）</option>
-              <option value="utf8">UTF-8 BOM付き（Excel向け）</option>
+              <option value="sjis">Shift_JIS（クリックポストはこれ）</option>
+              <option value="utf8">UTF-8 BOM付き（Excel / スプレッドシート向け）</option>
             </select>
           </label>
           <button class="act" id="fmtBtn" disabled>📄 送り状FMT作成（CSV）</button>
         </div>
-        <div class="fmtnote">明細1行＝CSV1行で出力します。取り込み先でエラーが出る場合は文字コードを切り替えてください。</div>
+        <div class="fmtnote" id="fmtNote"></div>
+        <div class="fmtwarn" id="fmtWarn" style="display:none;"></div>
       </div>
     </div>
   </div>
@@ -153,6 +158,7 @@ const SKU_SHORT = {
   'belt01':'メンズベルト',
   'belt02':'メンズベルト',
   'ri_wa01':'二つ折り財布',
+  'hp_sh01':'犬用炭酸入浴剤',
   'PB-RIU-FBA-001-L111':'姿勢サポーター', // Amazon
 };
 
@@ -276,11 +282,63 @@ function parseAmazonPage(lines){
   const addr=addrParts.join('');
   const skm=text.match(/SKU[:：]\s*([A-Za-z0-9][A-Za-z0-9\-_.]*)/);
   const sku=skm ? skm[1] : '';
-  const pnm=lines.find(l=>l.includes('【')) || '';
-  const qm=text.match(/(\d+)\s*【/);
-  const qty=qm ? qm[1] : '1';
+
+  // 商品名と数量：「1 【商品名…】」形式を優先し、【】が無い納品書にも対応
+  let pnm = '', qty = '';
+  const qm = text.match(/(\d+)\s*【/);
+  if(qm){ qty = qm[1]; }
+  // 「先頭が数量 + 商品名」の行を探す（郵便番号・注文番号の行は除く）
+  const item = lines.find(l=>
+    /^(\d{1,3})\s+\S/.test(l) &&
+    !/^\d{3}-?\d{4}$/.test(l) &&
+    !/注文|SKU|合計|小計|税|円|¥/.test(l)
+  );
+  if(item){
+    const m2 = item.match(/^(\d{1,3})\s+(.+)$/);
+    if(m2){ if(!qty) qty = m2[1]; pnm = m2[2].trim(); }
+  }
+  if(!pnm) pnm = lines.find(l=>l.includes('【')) || '';
+  if(!qty) qty = '1';
   if(!order && !zip && !name) return null;
-  return {order, name, zip, addr, addr1:addr, addr2:'', addr3:'', tel:'', sku, fullname:pnm, variation:'', qty};
+  const sp = splitJpAddress(addr);
+  return {order, name, zip, addr, addr1:sp.addr1, addr2:sp.addr2, addr3:sp.addr3,
+          tel:'', sku, fullname:pnm, variation:'', qty, source:'Amazon'};
+}
+
+// ===== 住所文字列を「都道府県+市区町村+町名 / 番地 / 建物」に自動分割 =====
+// Amazon納品書PDFは住所が1本の文字列でしか取れないため、ここで分ける
+function splitJpAddress(full){
+  let s = String(full||'').replace(/[　\s]+/g,' ').trim();
+  if(!s) return {addr1:'', addr2:'', addr3:''};
+
+  // 都道府県
+  const pm = s.match(/^(東京都|北海道|(?:京都|大阪)府|.{2,3}県)/);
+  const pref = pm ? pm[1] : '';
+  let rest = pref ? s.slice(pref.length) : s;
+
+  // 市区町村（郡＋町村 / 政令市＋区 / 単独）
+  let city = '';
+  let m;
+  if((m = rest.match(/^(.+?郡)(.+?[町村])/))){ city = m[1]+m[2]; }
+  else if((m = rest.match(/^(.+?市)(.+?区)/))){ city = m[1]+m[2]; }
+  else if((m = rest.match(/^(.+?[市区町村])/))){ city = m[1]; }
+  rest = rest.slice(city.length);
+
+  // 最初の数字までが町名、そこから先が番地＋建物
+  const i = rest.search(/[0-9０-９]/);
+  const town = i < 0 ? rest : rest.slice(0, i);
+  let tail = i < 0 ? '' : rest.slice(i);
+
+  // 番地は「数字・ハイフン・丁目番地号」だけで構成される先頭部分
+  let banchi = tail, bldg = '';
+  const bm = tail.match(/^[0-9０-９\-－ー‐−–の丁目番地号\s]+/);
+  if(bm){ banchi = bm[0].trim(); bldg = tail.slice(bm[0].length).trim(); }
+
+  return {
+    addr1: (pref + city + town).trim(),
+    addr2: banchi.trim(),
+    addr3: bldg.trim()
+  };
 }
 
 // find header row (contains 受取人 or 注文ID), data starts after description row
@@ -327,6 +385,7 @@ function parseSheet(aoa){
       fullname: g(row,'商品名'),
       variation: g(row,'バリエーション'),
       qty: g(row,'数量') || '1',
+      source: 'TikTok',
     });
   }
   return out;
@@ -384,7 +443,7 @@ function render(){
   });
 
   // main table : No | 宛名 | 〒・住所 | 注文ID | 商品名 | 個数 | 追跡番号
-  let th='<table><thead><tr><th class="c">No</th><th>宛名</th><th>〒・住所</th><th>注文ID</th><th>商品名</th><th class="c">個数</th><th class="trackh">追跡番号</th></tr></thead><tbody>';
+  let th='<table><thead><tr><th class="c">No</th><th>宛名</th><th>〒・住所</th><th class="c">元</th><th>注文ID</th><th>商品名</th><th class="c">個数</th><th class="trackh">追跡番号</th></tr></thead><tbody>';
   groups.forEach((gp,gi)=>{
     const n=gp.items.length;
     const addr=(fmtZip(gp.zip,true)+' '+gp.addr).trim();
@@ -395,7 +454,8 @@ function render(){
             `<td rowspan="${n}">${esc(gp.name)}</td>`+
             `<td rowspan="${n}">${esc(addr)}</td>`;
       }
-      th+=`<td class="ord">${esc(r.order)}</td><td>${esc(r.product)}</td><td class="c">${esc(r.qty)}</td>`;
+      th+=`<td class="c src">${esc(r.source==='Amazon'?'AMZ':'TT')}</td>`+
+           `<td class="ord">${esc(r.order)}</td><td>${esc(r.product)}</td><td class="c">${esc(r.qty)}</td>`;
       if(li===0) th+=`<td class="track" rowspan="${n}"></td>`;
       th+='</tr>';
     });
@@ -414,58 +474,134 @@ function render(){
 
 /* ===== 送り状フォーマット（CSV）出力 ===== */
 
-// 送り状テンプレの列順
-const FMT_HEADER = ['配送方法','郵便番号','お届け先氏名','敬称',
+// --- 汎用テンプレ（スプレッドシート「手入力」シート）の列順 ---
+const GENERIC_HEADER = ['配送方法','郵便番号','お届け先氏名','敬称',
   '住所1行目（都道府県・市区町村）','住所2行目（番地）','住所3行目（建物・部屋番号）',
   '住所4行目（任意）','電話番号（佐川は必須）','内容品','出力ステータス'];
 
-// 郵便番号：数字のみ7桁（ハイフンなし）
+// --- クリックポスト 公式CSVの列順（この文字列を1文字でも変えると取込エラーになる） ---
+const CLICKPOST_HEADER = ['お届け先郵便番号','お届け先氏名','お届け先敬称',
+  'お届け先住所1行目','お届け先住所2行目','お届け先住所3行目','お届け先住所4行目','内容品'];
+
+const CP_MAX_ROWS = 40;   // 1ファイルあたりの上限件数
+const CP_MAX_LEN  = 20;   // 各住所欄・氏名・内容品の上限文字数
+
+// 郵便番号：半角数字7桁（ハイフンなし）
 function fmtZipPlain(z){
-  const d = String(z||'').replace(/[^0-9]/g,'');
-  return d;
+  return toHalf(String(z||'')).replace(/[^0-9]/g,'');
 }
 
-// 電話番号：(+81)09012345678 → 09012345678 / 全角も半角化
+// 全角英数字・記号を半角へ
+function toHalf(s){
+  return String(s||'').replace(/[！-～]/g, c=>String.fromCharCode(c.charCodeAt(0)-0xFEE0))
+                      .replace(/　/g,' ');
+}
+
+// 電話番号：(+81)09012345678 → 09012345678
 function fmtTel(t){
-  let s = String(t||'').replace(/[０-９＋]/g, c=>String.fromCharCode(c.charCodeAt(0)-0xFEE0));
-  s = s.replace(/[^0-9+]/g,'');       // (+81)07033190310 → +8107033190310
-  s = s.replace(/^\+?81/,'');         // 国番号81を除去
-  s = s.replace(/[^0-9]/g,'');
+  let s = toHalf(t).replace(/[^0-9+]/g,'');
+  s = s.replace(/^\+?81/,'').replace(/[^0-9]/g,'');
   if(!s) return '';
-  if(s[0]!=='0') s = '0'+s;           // 先頭0を補う
+  if(s[0]!=='0') s = '0'+s;
   return s;
 }
 
 // 内容品：短縮商品名（個数2以上なら ×n）
+// 未登録SKUは商品名から【…】を除き、先頭の語だけを使って短くする
+function contentName(r){
+  if(SKU_SHORT[r.sku]) return SKU_SHORT[r.sku];
+  let s = String(r.fullname||'').replace(/【[^】]*】/g,'').replace(/[（(].*?[)）]/g,'');
+  s = s.replace(/[　\s]+/g,' ').trim();
+  const first = s.split(' ').filter(Boolean).slice(0,2).join(' ');
+  return (first || s || '雑貨');
+}
 function fmtContent(r){
   const q = parseInt(r.qty)||1;
-  return q>1 ? `${r.product}×${q}` : r.product;
+  let base = contentName(r).trim();
+  const v = r.variation;
+  if(v && v!=='デフォルト') base += ' '+v;
+  return q>1 ? `${base}×${q}` : base;
 }
 
-function fmtRow(r, method){
-  return [
-    method,
-    fmtZipPlain(r.zip),
-    r.name || '',
-    '様',
-    r.addr1 || r.addr || '',
-    r.addr2 || '',
-    r.addr3 || '',
-    '',
-    fmtTel(r.tel),
-    fmtContent(r),
-    ''
-  ];
+// 住所を4欄に詰める。各欄 CP_MAX_LEN 文字以内になるよう貪欲に詰め、
+// 1要素が長すぎる場合は分割する
+function packAddress(r, maxLen){
+  const segs = [
+    (r.addr1 || r.addr || ''),   // 都道府県＋市区町村＋町名
+    (r.addr2 || ''),             // 番地
+    (r.addr3 || '')              // 建物・部屋番号
+  ].map(x=>String(x).trim()).filter(Boolean);
+
+  // 長すぎる要素は maxLen ごとに割る
+  const chunks=[];
+  segs.forEach(seg=>{
+    while(seg.length > maxLen){ chunks.push(seg.slice(0,maxLen)); seg = seg.slice(maxLen); }
+    if(seg) chunks.push(seg);
+  });
+
+  // 4欄に収まるなら「都道府県市区町村町名 / 番地 / 建物」の並びをそのまま活かす
+  let lines;
+  if(chunks.length <= 4){
+    lines = chunks.slice();
+  }else{
+    // 収まらない場合だけ、前の欄に詰めて4欄に寄せる
+    lines=[];
+    chunks.forEach(seg=>{
+      if(lines.length && (lines[lines.length-1]+seg).length <= maxLen) lines[lines.length-1] += seg;
+      else lines.push(seg);
+    });
+  }
+  const overflow = lines.length > 4 ? lines.slice(4) : [];
+  while(lines.length < 4) lines.push('');
+  return {lines: lines.slice(0,4), overflow};
 }
 
 function csvCell(v){
   const s = String(v==null?'':v);
   return /[",\r\n]/.test(s) ? '"'+s.replace(/"/g,'""')+'"' : s;
 }
+function toCSV(rows){
+  return rows.map(row=>row.map(csvCell).join(',')).join('\r\n')+'\r\n';
+}
 
-function buildFmtCSV(recs, method){
-  const lines = [FMT_HEADER, ...recs.map(r=>fmtRow(r, method))];
-  return lines.map(row=>row.map(csvCell).join(',')).join('\r\n')+'\r\n';
+// --- クリックポスト用の行を作る（警告も同時に集める） ---
+function buildClickpostRows(recs){
+  const rows=[]; const warns=[];
+  recs.forEach(r=>{
+    const zip = fmtZipPlain(r.zip);
+    const {lines, overflow} = packAddress(r, CP_MAX_LEN);
+    let name = String(r.name||'').trim();
+    let content = fmtContent(r) || '雑貨';
+
+    if(zip.length!==7) warns.push(`${r.order}：郵便番号が7桁ではありません（${r.zip||'空欄'}）`);
+    if(!name) warns.push(`${r.order}：お届け先氏名が空欄です`);
+    if(name.length > CP_MAX_LEN){ warns.push(`${r.order}：氏名が${CP_MAX_LEN}文字を超えるため切り詰めました（${name}）`); name = name.slice(0,CP_MAX_LEN); }
+    if(content.length > CP_MAX_LEN){ warns.push(`${r.order}：内容品が${CP_MAX_LEN}文字を超えるため切り詰めました（${content}）`); content = content.slice(0,CP_MAX_LEN); }
+    if(overflow.length) warns.push(`${r.order}：住所が4欄に収まらず末尾を切り捨てました（${overflow.join(' / ')}）`);
+
+    rows.push([zip, name, '様', lines[0], lines[1], lines[2], lines[3], content]);
+  });
+  return {rows, warns};
+}
+
+function buildGenericRows(recs, methodLabel){
+  const rows=[], warns=[];
+  recs.forEach(r=>{
+    const zip = fmtZipPlain(r.zip);
+    const tel = fmtTel(r.tel);
+    if(zip.length!==7) warns.push(`${r.order}：郵便番号が7桁ではありません（${r.zip||'空欄'}）`);
+    if(!String(r.name||'').trim()) warns.push(`${r.order}：お届け先氏名が空欄です`);
+    if(methodLabel==='佐川急便' && !tel){
+      warns.push(`${r.order}：電話番号がありません（佐川は必須）${r.source==='Amazon'?'／Amazon納品書PDFには電話番号が印字されないため手入力が必要です':''}`);
+    }
+    if(!r.addr2 && r.source==='Amazon') warns.push(`${r.order}：番地を自動判別できませんでした（住所1行目に丸ごと入っています）`);
+    rows.push([
+      methodLabel, zip, r.name||'', '様',
+      r.addr1||r.addr||'', r.addr2||'', r.addr3||'', '',
+      tel, fmtContent(r), ''
+    ]);
+  });
+  return {rows, warns};
 }
 
 function downloadCSV(text, filename, enc){
@@ -480,22 +616,85 @@ function downloadCSV(text, filename, enc){
   const a = document.createElement('a');
   a.href = url; a.download = filename;
   document.body.appendChild(a); a.click(); document.body.removeChild(a);
-  setTimeout(()=>URL.revokeObjectURL(url), 1000);
+  setTimeout(()=>URL.revokeObjectURL(url), 2000);
+}
+
+function stamp(){
+  const d=new Date(), p=n=>String(n).padStart(2,'0');
+  return `${d.getFullYear()}${p(d.getMonth()+1)}${p(d.getDate())}_${p(d.getHours())}${p(d.getMinutes())}`;
+}
+
+function showWarn(html, ok){
+  const el=$('fmtWarn');
+  el.className = 'fmtwarn'+(ok?' ok':'');
+  el.innerHTML = html;
+  el.style.display='block';
 }
 
 function exportFmt(){
   if(!currentRecs.length){ alert('先に「リストを作成」してください。'); return; }
-  const method = $('shipMethod').value;
+  const mode = $('fmtMode').value;
   let enc = $('csvEnc').value;
   if(enc==='sjis' && !window.Encoding){
     alert('Shift_JIS変換ライブラリが読み込めなかったため、UTF-8（BOM付き）で出力します。');
     enc = 'utf8';
   }
-  const csv = buildFmtCSV(currentRecs, method);
-  const d = new Date();
-  const ymd = d.getFullYear()+String(d.getMonth()+1).padStart(2,'0')+String(d.getDate()).padStart(2,'0');
-  downloadCSV(csv, `送り状FMT_${ymd}.csv`, enc);
+  const ts = stamp();
+  const amazonCount = currentRecs.filter(r=>r.source==='Amazon').length;
+
+  if(mode==='clickpost'){
+    if(enc!=='sjis' && !confirm('クリックポストの取込はShift_JIS指定です。UTF-8のまま出力しますか？')) return;
+
+    const {rows, warns} = buildClickpostRows(currentRecs);
+    const chunks=[];
+    for(let i=0;i<rows.length;i+=CP_MAX_ROWS) chunks.push(rows.slice(i,i+CP_MAX_ROWS));
+    chunks.forEach((chunk,i)=>{
+      const csv = toCSV([CLICKPOST_HEADER, ...chunk]);
+      const suffix = chunks.length>1 ? `_${i+1}` : '';
+      setTimeout(()=>downloadCSV(csv, `クリックポスト_${ts}${suffix}.csv`, enc), i*400);
+    });
+    let html = `<b>クリックポスト用CSVを${chunks.length}ファイル出力しました（合計 ${rows.length} 件）</b>`;
+    if(chunks.length>1) html += `1ファイル${CP_MAX_ROWS}件までのため分割しています。<br>`;
+    if(amazonCount) html += `Amazon納品書PDFから ${amazonCount} 件を含みます。住所は自動分割のため、下の一覧で分かれ方をご確認ください。<br>`;
+    if(warns.length){
+      html += `要確認 ${warns.length} 件：<br>・` + warns.map(esc).join('<br>・');
+      showWarn(html, false);
+    }else{
+      html += 'ヘッダー・文字コード（Shift_JIS）・住所20文字以内をすべて満たしています。';
+      showWarn(html, true);
+    }
+    return;
+  }
+
+  // --- 手入力シート貼付用（11列） ---
+  const method = $('shipMethod').value;
+  const {rows, warns} = buildGenericRows(currentRecs, method);
+  const csv = toCSV([GENERIC_HEADER, ...rows]);
+  downloadCSV(csv, `送り状FMT_${method}_${ts}.csv`, enc);
+
+  let html = `<b>手入力シート貼付用CSVを ${rows.length} 件出力しました（配送方法: ${esc(method)}）</b>`;
+  html += 'スプレッドシート「手入力」シートの2行目から貼り付けてください。<br>';
+  if(warns.length){
+    html += `要確認 ${warns.length} 件：<br>・` + warns.map(esc).join('<br>・');
+    showWarn(html, false);
+  }else{
+    showWarn(html, true);
+  }
 }
+
+const FMT_NOTES = {
+  clickpost: 'クリックポスト公式CSV（8列 / Shift_JIS / 1ファイル40件まで / 住所各欄20文字以内）で出力します。ヘッダー行はそのまま残してアップロードしてください。',
+  generic: 'スプレッドシート「手入力」シートと同じ11列（配送方法〜出力ステータス）で出力します。佐川はここから伝票を作成してください。'
+};
+function updateFmtNote(){
+  const mode=$('fmtMode').value;
+  $('fmtNote').textContent = FMT_NOTES[mode]||'';
+  $('methodWrap').style.display = (mode==='generic') ? '' : 'none';
+  $('csvEnc').value = (mode==='clickpost') ? 'sjis' : 'utf8';
+  $('fmtWarn').style.display='none';
+}
+$('fmtMode').addEventListener('change', updateFmtNote);
+updateFmtNote();
 
 function renderFileList(){
   const el=$('fileList');
