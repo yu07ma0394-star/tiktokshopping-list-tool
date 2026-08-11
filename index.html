@@ -68,6 +68,25 @@
   th.trackh{width:110px;}
   td.track{min-width:110px; background:#fff;}
   td.src{font-size:10px; color:var(--gray); width:34px;}
+  th.chkh{width:44px; text-align:center;}
+  td.chk{text-align:center; padding:2px;}
+  td.chk input{width:17px; height:17px; cursor:pointer; accent-color:var(--blue);}
+  td.chk .chkprint{display:none; font-size:12px;}
+  tr.picked td{background:#eef5fd;}
+  tr.unpicked td{color:#aaa;}
+  th.wh{width:52px;}
+  td.wt{text-align:right; font-size:11px; color:var(--gray); font-variant-numeric:tabular-nums;}
+  .bulkrow{margin-top:12px; display:flex; flex-wrap:wrap; gap:8px; align-items:center;}
+  .bulklabel{font-size:12px; color:var(--gray);}
+  button.mini{font-size:12px; padding:5px 12px; border-radius:15px; cursor:pointer;
+    border:1px solid var(--line); background:#fff; color:#333;}
+  button.mini:hover{background:var(--blue-xl); border-color:var(--blue); color:var(--blue);}
+  .counts{font-size:12px; color:#333; margin-left:4px;}
+  .counts b{font-weight:bold;}
+  .badge{display:inline-block; padding:2px 9px; border-radius:11px; margin-right:6px; font-size:11px;}
+  .badge.cp{background:#dceaf9; color:#1c4f86;}
+  .badge.sg{background:#fbe3cd; color:#8a4a08;}
+  .badge.x{background:#e6e6e6; color:#666;}
   tbody tr.grp td{border-top:2px solid #8aa9c8;}
   .print-head{display:none;}
   @media print{
@@ -80,6 +99,10 @@
     th,td{padding:2.5px 4px;}
     thead{display:table-header-group;}
     tr{page-break-inside:avoid;}
+    td.chk input{display:none;}
+    td.chk .chkprint{display:inline;}
+    tr.picked td{background:#fff !important;}
+    tr.unpicked{display:none;}
     @page{size:A4; margin:10mm;}
   }
 </style>
@@ -111,6 +134,7 @@
           <label>出力形式
             <select id="fmtMode">
               <option value="clickpost">クリックポスト 公式CSV（直接取込）</option>
+              <option value="sagawa">佐川急便 取込CSV（直接取込）</option>
               <option value="generic">手入力シート貼付用CSV（11列）</option>
             </select>
           </label>
@@ -118,15 +142,29 @@
             <select id="shipMethod">
               <option>クリックポスト</option>
               <option>佐川急便</option>
+              <option>ゆうパケット</option>
+              <option>ゆうパック</option>
+              <option>ネコポス</option>
+              <option>宅急便</option>
             </select>
           </label>
           <label>文字コード
             <select id="csvEnc">
               <option value="sjis">Shift_JIS（クリックポストはこれ）</option>
-              <option value="utf8">UTF-8 BOM付き（Excel / スプレッドシート向け）</option>
+              <option value="utf8">UTF-8 BOM付き（佐川・スプレッドシートはこれ）</option>
             </select>
           </label>
+          <label id="descWrap" style="display:none;">
+            <input type="checkbox" id="incDesc" checked> 先頭の説明行を含める
+          </label>
           <button class="act" id="fmtBtn" disabled>📄 送り状FMT作成（CSV）</button>
+        </div>
+        <div class="bulkrow">
+          <span class="bulklabel">チェックした宛先だけ出力します：</span>
+          <button class="mini" data-bulk="all">全選択</button>
+          <button class="mini" data-bulk="none">全解除</button>
+          <button class="mini" data-bulk="invert">選択を反転</button>
+          <span class="counts" id="counts"></span>
         </div>
         <div class="fmtnote" id="fmtNote"></div>
         <div class="fmtwarn" id="fmtWarn" style="display:none;"></div>
@@ -181,7 +219,7 @@ $('genBtn').addEventListener('click', render);
 $('printBtn').addEventListener('click', ()=>window.print());
 $('fmtBtn').addEventListener('click', exportFmt);
 $('clearBtn').addEventListener('click', ()=>{
-  filesData=[]; currentRecs=[]; renderFileList(); $('output').style.display='none';
+  filesData=[]; currentRecs=[]; currentGroups=[]; pickMap={}; renderFileList(); $('output').style.display='none';
   $('emptyMsg').style.display='block'; $('emptyMsg').textContent='ファイルを読み込むとここに一覧が表示されます。';
   $('genBtn').disabled=true; $('printBtn').disabled=true; $('fmtBtn').disabled=true;
   fileInput.value='';
@@ -302,7 +340,7 @@ function parseAmazonPage(lines){
   if(!order && !zip && !name) return null;
   const sp = splitJpAddress(addr);
   return {order, name, zip, addr, addr1:sp.addr1, addr2:sp.addr2, addr3:sp.addr3,
-          tel:'', sku, fullname:pnm, variation:'', qty, source:'Amazon'};
+          tel:'', sku, fullname:pnm, variation:'', qty, weight:'', source:'Amazon'};
 }
 
 // ===== 住所文字列を「都道府県+市区町村+町名 / 番地 / 建物」に自動分割 =====
@@ -385,6 +423,7 @@ function parseSheet(aoa){
       fullname: g(row,'商品名'),
       variation: g(row,'バリエーション'),
       qty: g(row,'数量') || '1',
+      weight: g(row,'重量（kg）'),
       source: 'TikTok',
     });
   }
@@ -405,6 +444,24 @@ function fmtZip(z, hyphen){
   return '〒'+z;
 }
 
+// 宛先ごとのチェック状態を保持（key = 宛名|〒|住所）
+let pickMap = {};
+let currentGroups = [];
+
+function groupKey(r){ return r.name+'|'+r.zip+'|'+r.addr; }
+
+// この宛先が出力対象か（初期値はチェックON）
+function isPicked(r){ const k=groupKey(r); return pickMap[k] !== false; }
+
+// 宛先の合計重量（kg）。参考表示用で、判定には使わない
+function groupWeight(items){
+  const w = items.reduce((s,r)=>{
+    const v = parseFloat(String(r.weight||'').replace(/[^0-9.]/g,''));
+    return s + (isNaN(v)?0:v) * (parseInt(r.qty)||1);
+  },0);
+  return w>0 ? (Math.round(w*100)/100) : null;
+}
+
 function render(){
   let recs=[];
   filesData.forEach((f,fi)=>{
@@ -413,12 +470,11 @@ function render(){
   });
 
   if(!recs.length){
-    currentRecs=[]; $('fmtBtn').disabled=true;
+    currentRecs=[]; currentGroups=[]; $('fmtBtn').disabled=true;
     $('output').style.display='none'; $('emptyMsg').style.display='block';
     $('emptyMsg').textContent='有効な注文データが見つかりませんでした。'; return;
   }
 
-  // ファイル順（読み込んだ順・行順を保持）
   recs.sort((a,b)=> a.fileIdx-b.fileIdx || a.rowIdx-b.rowIdx);
   currentRecs = recs;
 
@@ -434,28 +490,38 @@ function render(){
   sh+='</tbody></table>';
   $('summary').innerHTML=sh;
 
-  // 同一宛先（宛名＋〒＋住所）でまとめる（読み込み順を保持）
+  // 同一宛先でまとめる
   const groups=[]; const gmap={};
   recs.forEach(r=>{
-    const key=r.name+'|'+r.zip+'|'+r.addr;
-    if(!(key in gmap)){ gmap[key]=groups.length; groups.push({name:r.name, zip:r.zip, addr:r.addr, items:[]}); }
+    const key=groupKey(r);
+    if(!(key in gmap)){ gmap[key]=groups.length; groups.push({key, name:r.name, zip:r.zip, addr:r.addr, items:[]}); }
     groups[gmap[key]].items.push(r);
   });
+  // 未設定の宛先は重量から自動判定
+  groups.forEach(gp=>{ if(!(gp.key in pickMap)) pickMap[gp.key] = true; });
+  currentGroups = groups;
 
-  // main table : No | 宛名 | 〒・住所 | 注文ID | 商品名 | 個数 | 追跡番号
-  let th='<table><thead><tr><th class="c">No</th><th>宛名</th><th>〒・住所</th><th class="c">元</th><th>注文ID</th><th>商品名</th><th class="c">個数</th><th class="trackh">追跡番号</th></tr></thead><tbody>';
+  let th='<table><thead><tr><th class="chkh"><input type="checkbox" id="chkAll"></th><th class="c">No</th>'+
+         '<th>宛名</th><th>〒・住所</th><th class="wh">重量</th>'+
+         '<th class="c">元</th><th>注文ID</th><th>商品名</th><th class="c">個数</th><th class="trackh">追跡番号</th></tr></thead><tbody>';
   groups.forEach((gp,gi)=>{
     const n=gp.items.length;
     const addr=(fmtZip(gp.zip,true)+' '+gp.addr).trim();
+    const on = pickMap[gp.key] !== false;
+    const w = groupWeight(gp.items);
+    const box = `<input type="checkbox" class="pickbox" data-key="${esc(gp.key)}"${on?' checked':''}>`+
+                `<span class="chkprint">${on?'✓':''}</span>`;
     gp.items.forEach((r,li)=>{
-      th+= (li===0? '<tr class="grp">' : '<tr>');
+      th+= (li===0 ? `<tr class="grp ${on?'picked':'unpicked'}">` : `<tr class="${on?'picked':'unpicked'}">`);
       if(li===0){
-        th+=`<td class="c" rowspan="${n}">${gi+1}</td>`+
+        th+=`<td class="chk" rowspan="${n}">${box}</td>`+
+            `<td class="c" rowspan="${n}">${gi+1}</td>`+
             `<td rowspan="${n}">${esc(gp.name)}</td>`+
-            `<td rowspan="${n}">${esc(addr)}</td>`;
+            `<td rowspan="${n}">${esc(addr)}</td>`+
+            `<td class="wt" rowspan="${n}">${w!=null ? w+'kg' : ''}</td>`;
       }
       th+=`<td class="c src">${esc(r.source==='Amazon'?'AMZ':'TT')}</td>`+
-           `<td class="ord">${esc(r.order)}</td><td>${esc(r.product)}</td><td class="c">${esc(r.qty)}</td>`;
+          `<td class="ord">${esc(r.order)}</td><td>${esc(r.product)}</td><td class="c">${esc(r.qty)}</td>`;
       if(li===0) th+=`<td class="track" rowspan="${n}"></td>`;
       th+='</tr>';
     });
@@ -463,9 +529,39 @@ function render(){
   th+='</tbody></table>';
   $('listTable').innerHTML=th;
 
+  $('listTable').querySelectorAll('.pickbox').forEach(box=>{
+    box.addEventListener('change', e=>{
+      const on = e.target.checked;
+      pickMap[e.target.dataset.key] = on;
+      // 見た目だけその場で更新（全再描画しないのでスクロール位置が動かない）
+      const cell = e.target.closest('td');
+      const span = cell.querySelector('.chkprint');
+      if(span) span.textContent = on ? '✓' : '';
+      const n = parseInt(cell.getAttribute('rowspan')) || 1;
+      let tr = cell.closest('tr');
+      for(let i=0;i<n && tr;i++){
+        tr.classList.toggle('picked', on);
+        tr.classList.toggle('unpicked', !on);
+        tr = tr.nextElementSibling;
+      }
+      syncChkAll();
+      updateCounts();
+      $('fmtWarn').style.display='none';
+    });
+  });
+  const all = $('chkAll');
+  if(all){
+    syncChkAll();
+    all.addEventListener('change', e=>{
+      currentGroups.forEach(gp=>{ pickMap[gp.key] = e.target.checked; });
+      render(); $('fmtWarn').style.display='none';
+    });
+  }
+
   const today=new Date().toLocaleDateString('ja-JP');
   $('meta').textContent=`作成日: ${today}　／　発送先: ${groups.length} 件　明細: ${totalLines} 件　総個数: ${totalQty} 個　（読込ファイル: ${filesData.map(f=>f.name).join(', ')}）`;
 
+  updateCounts();
   $('emptyMsg').style.display='none';
   $('output').style.display='block';
   $('printBtn').disabled=false;
@@ -482,6 +578,13 @@ const GENERIC_HEADER = ['配送方法','郵便番号','お届け先氏名','敬�
 // --- クリックポスト 公式CSVの列順（この文字列を1文字でも変えると取込エラーになる） ---
 const CLICKPOST_HEADER = ['お届け先郵便番号','お届け先氏名','お届け先敬称',
   'お届け先住所1行目','お届け先住所2行目','お届け先住所3行目','お届け先住所4行目','内容品'];
+
+// --- 佐川急便 取込CSVの列順（テンプレート okurijo_torikomi_format.csv と同一） ---
+const SAGAWA_HEADER = ['お届け先郵便番号','お届け先氏名','お届け先敬称',
+  'お届け先住所1行目','お届け先住所2行目','お届け先住所3行目','お届け先住所4行目',
+  '電話番号','品名１'];
+// テンプレート先頭にある説明行（1行目はLF、2行目は空行）
+const SAGAWA_DESC = '以下のようなフォーマットで、データを設定してください。\n\r\n';
 
 const CP_MAX_ROWS = 40;   // 1ファイルあたりの上限件数
 const CP_MAX_LEN  = 20;   // 各住所欄・氏名・内容品の上限文字数
@@ -563,10 +666,22 @@ function csvCell(v){
 function toCSV(rows){
   return rows.map(row=>row.map(csvCell).join(',')).join('\r\n')+'\r\n';
 }
+// 佐川テンプレートは全項目がダブルクォートで囲まれているので合わせる
+function toQuotedCSV(rows){
+  return rows.map(row=>row.map(v=>'"'+String(v==null?'':v).replace(/"/g,'""')+'"').join(',')).join('\r\n')+'\r\n';
+}
 
 // --- クリックポスト用の行を作る（警告も同時に集める） ---
 function buildClickpostRows(recs){
   const rows=[]; const warns=[];
+
+  // 同じ宛先が複数明細ある場合は送り状が枚数分できてしまうので知らせる
+  const dup={};
+  recs.forEach(r=>{ const k=groupKey(r); dup[k]=(dup[k]||0)+1; });
+  Object.keys(dup).filter(k=>dup[k]>1).forEach(k=>{
+    warns.push(`${k.split('|')[0]} 様：同じ宛先で ${dup[k]} 明細あるため送り状も ${dup[k]} 枚になります（1個口にまとめる場合は不要な行を削除してください）`);
+  });
+
   recs.forEach(r=>{
     const zip = fmtZipPlain(r.zip);
     const {lines, overflow} = packAddress(r, CP_MAX_LEN);
@@ -584,19 +699,46 @@ function buildClickpostRows(recs){
   return {rows, warns};
 }
 
-function buildGenericRows(recs, methodLabel){
+// --- 佐川急便 取込CSV用の行を作る ---
+function buildSagawaRows(recs){
+  const rows=[]; const warns=[];
+
+  const dup={};
+  recs.forEach(r=>{ const k=groupKey(r); dup[k]=(dup[k]||0)+1; });
+  Object.keys(dup).filter(k=>dup[k]>1).forEach(k=>{
+    warns.push(`${k.split('|')[0]} 様：同じ宛先で ${dup[k]} 明細あるため送り状も ${dup[k]} 枚になります（1個口にまとめる場合は不要な行を削除してください）`);
+  });
+
+  recs.forEach(r=>{
+    const zip = fmtZipPlain(r.zip);
+    const tel = fmtTel(r.tel);
+    const {lines, overflow} = packAddress(r, CP_MAX_LEN);
+    const name = String(r.name||'').trim();
+    const item = fmtContent(r) || '雑貨';
+
+    if(zip.length!==7) warns.push(`${r.order}：郵便番号が7桁ではありません（${r.zip||'空欄'}）`);
+    if(!name) warns.push(`${r.order}：お届け先氏名が空欄です`);
+    if(!tel) warns.push(`${r.order}：電話番号がありません（佐川は必須）${r.source==='Amazon'?'／Amazon納品書PDFには印字されないため手入力が必要です':''}`);
+    if(overflow.length) warns.push(`${r.order}：住所が4欄に収まらず末尾を切り捨てました（${overflow.join(' / ')}）`);
+
+    rows.push([zip, name, '様', lines[0], lines[1], lines[2], lines[3], tel, item]);
+  });
+  return {rows, warns};
+}
+
+function buildGenericRows(recs, method){
   const rows=[], warns=[];
   recs.forEach(r=>{
     const zip = fmtZipPlain(r.zip);
     const tel = fmtTel(r.tel);
     if(zip.length!==7) warns.push(`${r.order}：郵便番号が7桁ではありません（${r.zip||'空欄'}）`);
     if(!String(r.name||'').trim()) warns.push(`${r.order}：お届け先氏名が空欄です`);
-    if(methodLabel==='佐川急便' && !tel){
+    if(method==='佐川急便' && !tel){
       warns.push(`${r.order}：電話番号がありません（佐川は必須）${r.source==='Amazon'?'／Amazon納品書PDFには電話番号が印字されないため手入力が必要です':''}`);
     }
     if(!r.addr2 && r.source==='Amazon') warns.push(`${r.order}：番地を自動判別できませんでした（住所1行目に丸ごと入っています）`);
     rows.push([
-      methodLabel, zip, r.name||'', '様',
+      method, zip, r.name||'', '様',
       r.addr1||r.addr||'', r.addr2||'', r.addr3||'', '',
       tel, fmtContent(r), ''
     ]);
@@ -640,12 +782,19 @@ function exportFmt(){
     enc = 'utf8';
   }
   const ts = stamp();
-  const amazonCount = currentRecs.filter(r=>r.source==='Amazon').length;
+
+  // チェックの入った宛先だけを出力対象にする
+  const target  = currentRecs.filter(isPicked);
+  const skipped = currentRecs.length - target.length;
+  if(!target.length){
+    showWarn('<b>出力対象が選ばれていません</b>一覧の左端のチェックボックスで出力したい宛先を選んでください。', false);
+    return;
+  }
 
   if(mode==='clickpost'){
     if(enc!=='sjis' && !confirm('クリックポストの取込はShift_JIS指定です。UTF-8のまま出力しますか？')) return;
 
-    const {rows, warns} = buildClickpostRows(currentRecs);
+    const {rows, warns} = buildClickpostRows(target);
     const chunks=[];
     for(let i=0;i<rows.length;i+=CP_MAX_ROWS) chunks.push(rows.slice(i,i+CP_MAX_ROWS));
     chunks.forEach((chunk,i)=>{
@@ -653,9 +802,12 @@ function exportFmt(){
       const suffix = chunks.length>1 ? `_${i+1}` : '';
       setTimeout(()=>downloadCSV(csv, `クリックポスト_${ts}${suffix}.csv`, enc), i*400);
     });
-    let html = `<b>クリックポスト用CSVを${chunks.length}ファイル出力しました（合計 ${rows.length} 件）</b>`;
+
+    let html = `<b>クリックポスト用CSVを${chunks.length}ファイル出力しました（${rows.length} 件）</b>`;
     if(chunks.length>1) html += `1ファイル${CP_MAX_ROWS}件までのため分割しています。<br>`;
-    if(amazonCount) html += `Amazon納品書PDFから ${amazonCount} 件を含みます。住所は自動分割のため、下の一覧で分かれ方をご確認ください。<br>`;
+    if(skipped) html += `チェックの入っていない ${skipped} 件は含んでいません。<br>`;
+    const amz = target.filter(r=>r.source==='Amazon').length;
+    if(amz) html += `Amazon納品書PDFから ${amz} 件を含みます。住所は自動分割のため一覧で分かれ方をご確認ください。<br>`;
     if(warns.length){
       html += `要確認 ${warns.length} 件：<br>・` + warns.map(esc).join('<br>・');
       showWarn(html, false);
@@ -666,14 +818,34 @@ function exportFmt(){
     return;
   }
 
+  if(mode==='sagawa'){
+    const {rows, warns} = buildSagawaRows(target);
+    const body = toQuotedCSV([SAGAWA_HEADER, ...rows]);
+    const csv = $('incDesc').checked ? (SAGAWA_DESC + body) : body;
+    downloadCSV(csv, `佐川_${ts}.csv`, enc);
+
+    let html = `<b>佐川急便 取込CSVを ${rows.length} 件出力しました</b>`;
+    html += `テンプレートと同じ9列・全項目ダブルクォート・${enc==='sjis'?'Shift_JIS':'UTF-8（BOM付き）'}で出力しています。<br>`;
+    if(!$('incDesc').checked) html += '先頭の説明行は省いています。取込でエラーが出る場合はチェックを入れ直してください。<br>';
+    if(skipped) html += `チェックの入っていない ${skipped} 件は含んでいません。<br>`;
+    if(warns.length){
+      html += `要確認 ${warns.length} 件：<br>・` + warns.map(esc).join('<br>・');
+      showWarn(html, false);
+    }else{
+      showWarn(html, true);
+    }
+    return;
+  }
+
   // --- 手入力シート貼付用（11列） ---
   const method = $('shipMethod').value;
-  const {rows, warns} = buildGenericRows(currentRecs, method);
+  const {rows, warns} = buildGenericRows(target, method);
   const csv = toCSV([GENERIC_HEADER, ...rows]);
   downloadCSV(csv, `送り状FMT_${method}_${ts}.csv`, enc);
 
   let html = `<b>手入力シート貼付用CSVを ${rows.length} 件出力しました（配送方法: ${esc(method)}）</b>`;
   html += 'スプレッドシート「手入力」シートの2行目から貼り付けてください。<br>';
+  if(skipped) html += `チェックの入っていない ${skipped} 件は含んでいません。<br>`;
   if(warns.length){
     html += `要確認 ${warns.length} 件：<br>・` + warns.map(esc).join('<br>・');
     showWarn(html, false);
@@ -682,14 +854,50 @@ function exportFmt(){
   }
 }
 
+// ヘッダーの全選択チェックの状態を同期（一部だけONなら中間表示）
+function syncChkAll(){
+  const all = $('chkAll');
+  if(!all || !currentGroups.length) return;
+  const on = currentGroups.filter(gp=>pickMap[gp.key]!==false).length;
+  all.checked = (on === currentGroups.length);
+  all.indeterminate = (on > 0 && on < currentGroups.length);
+}
+
+// 選択件数を表示
+function updateCounts(){
+  const el = $('counts');
+  if(!el) return;
+  if(!currentGroups.length){ el.innerHTML=''; return; }
+  const on = currentGroups.filter(gp=>pickMap[gp.key]!==false).length;
+  const off = currentGroups.length - on;
+  el.innerHTML = `<span class="badge cp">選択中 <b>${on}</b> 件</span>`+
+                 (off ? `<span class="badge x">未選択 <b>${off}</b> 件</span>` : '');
+}
+
+document.querySelectorAll('button[data-bulk]').forEach(btn=>{
+  btn.addEventListener('click', ()=>{
+    if(!currentGroups.length){ alert('先に「リストを作成」してください。'); return; }
+    const v = btn.dataset.bulk;
+    currentGroups.forEach(gp=>{
+      if(v==='all') pickMap[gp.key] = true;
+      else if(v==='none') pickMap[gp.key] = false;
+      else pickMap[gp.key] = (pickMap[gp.key] === false);   // invert
+    });
+    render();
+    $('fmtWarn').style.display='none';
+  });
+});
+
 const FMT_NOTES = {
   clickpost: 'クリックポスト公式CSV（8列 / Shift_JIS / 1ファイル40件まで / 住所各欄20文字以内）で出力します。ヘッダー行はそのまま残してアップロードしてください。',
-  generic: 'スプレッドシート「手入力」シートと同じ11列（配送方法〜出力ステータス）で出力します。佐川はここから伝票を作成してください。'
+  sagawa: '佐川の取込テンプレート（9列 / UTF-8 BOM付き / 全項目ダブルクォート）と同じ形で出力します。電話番号は必須です。',
+  generic: 'スプレッドシート「手入力」シートと同じ11列で出力します。配送方法列には上で選んだ業者が入るので、佐川はここから伝票を作成してください。'
 };
 function updateFmtNote(){
   const mode=$('fmtMode').value;
   $('fmtNote').textContent = FMT_NOTES[mode]||'';
   $('methodWrap').style.display = (mode==='generic') ? '' : 'none';
+  $('descWrap').style.display   = (mode==='sagawa') ? '' : 'none';
   $('csvEnc').value = (mode==='clickpost') ? 'sjis' : 'utf8';
   $('fmtWarn').style.display='none';
 }
