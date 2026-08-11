@@ -112,12 +112,12 @@
 
   <div class="noprint">
     <h1>発送リスト作成ツール</h1>
-    <div class="sub">TikTok Shop の注文エクスポート（Excel / CSV）や Amazon の納品書（PDF）を読み込んで、宛名・住所・商品・個数の一覧を作り、そのまま印刷できます。データはブラウザ内だけで処理され、どこにも送信されません。</div>
+    <div class="sub">TikTok Shop / Qoo10 の注文エクスポート（Excel / CSV）や Amazon の納品書（PDF）を読み込んで、宛名・住所・商品・個数の一覧を作り、そのまま印刷・送り状CSV出力できます。データはブラウザ内だけで処理され、どこにも送信されません。</div>
 
     <div class="panel">
       <div class="drop" id="drop">
         <b>ファイルをドラッグ＆ドロップ</b>、またはクリックして選択<br>
-        <small>.xlsx / .xls / .csv / .pdf（複数選択・追加読み込みOK）</small>
+        <small>.xlsx / .xls / .csv / .pdf（複数選択・追加読み込みOK）<br>TikTok Shop・Qoo10 の注文一覧、Amazon の納品書に対応</small>
       </div>
       <input type="file" id="fileInput" multiple accept=".xlsx,.xls,.csv,.pdf">
       <div class="files" id="fileList"></div>
@@ -189,6 +189,10 @@
 </div>
 
 <script>
+const SRC_LABEL = {'TikTok':'TT', 'Amazon':'AMZ', 'Qoo10':'Q10'};
+
+const CP_MAX_LEN = 20;   // 各住所欄・氏名・内容品の上限文字数
+
 const SKU_SHORT = {
   'wo01':'ウィッグオイル 300mL',
   'ri_se01':'姿勢サポーター',
@@ -253,6 +257,9 @@ async function handleFiles(fileList){
   if(!arr.length) return;
   for(const file of arr){
     try{
+      if(/\.(numbers|pages|key)$/i.test(file.name)){
+        throw new Error('Apple Numbers のファイルは読み込めません。Numbers で「ファイル → 書き出す → CSV / Excel」を選んで書き出したファイルをお使いください。');
+      }
       const buf = await file.arrayBuffer();
       let rows;
       if(/\.pdf$/i.test(file.name)){
@@ -379,45 +386,90 @@ function splitJpAddress(full){
   };
 }
 
-// find header row (contains 受取人 or 注文ID), data starts after description row
-function parseSheet(aoa){
-  let headerIdx = -1;
-  for(let i=0;i<Math.min(aoa.length,5);i++){
-    const row = aoa[i].map(x=>String(x).trim());
-    if(row.includes('注文ID') && (row.includes('受取人')||row.includes('数量'))){ headerIdx=i; break; }
+// ===== 注文一覧シートの解析（TikTok Shop / Qoo10 を自動判別） =====
+const SHEET_FORMATS = [
+  { platform:'TikTok', idCol:'注文ID',   needs:['受取人','数量'] },
+  { platform:'Qoo10',  idCol:'注文番号', needs:['受取人名','住所'] },
+];
+
+function detectFormat(row){
+  for(const f of SHEET_FORMATS){
+    if(row.includes(f.idCol) && f.needs.some(k=>row.includes(k))) return f;
   }
-  if(headerIdx<0) headerIdx=0;
+  return null;
+}
+
+function parseSheet(aoa){
+  let headerIdx = -1, fmt = null;
+  for(let i=0;i<Math.min(aoa.length,6);i++){
+    const row = (aoa[i]||[]).map(x=>String(x).trim());
+    const f = detectFormat(row);
+    if(f){ headerIdx=i; fmt=f; break; }
+  }
+  if(!fmt) return [];   // 対応していないシート
+
   const header = aoa[headerIdx].map(x=>String(x).trim());
   const col = {};
   header.forEach((h,i)=>{ if(h && !(h in col)) col[h]=i; });
-  const g=(row,name)=>{ const i=col[name]; return (i==null||row[i]==null)?'':String(row[i]).trim(); };
+  const g=(row,name)=>{
+    const i=col[name];
+    if(i==null || row[i]==null) return '';
+    let v = String(row[i]).trim();
+    if(/^\d+\.0$/.test(v)) v = v.slice(0,-2);     // Excelの 1.0 → 1
+    return v.replace(/^'/,'').replace(/　/g,' ').trim();  // 先頭のアポストロフィ・全角スペース
+  };
 
-  // detect if row after header is a description row (row where 注文ID cell is a description sentence)
+  // データ開始行（TikTokはヘッダーの次に説明行が入ることがある）
   let start = headerIdx+1;
-  const idIdx = col['注文ID'];
+  const idIdx = col[fmt.idCol];
   if(idIdx!=null){
     const first = String(aoa[start] ? aoa[start][idIdx] : '').trim();
-    // real order IDs are long digit strings; description contains 。 or non-digits
-    if(!/^\d{6,}$/.test(first)) start = headerIdx+2;
+    if(!/^\d{6,}/.test(first)) start = headerIdx+2;
   }
 
   const out=[];
   for(let i=start;i<aoa.length;i++){
     const row = aoa[i];
     if(!row) continue;
-    const order = g(row,'注文ID');
+    const order = g(row, fmt.idCol);
     if(!/^\d{6,}$/.test(order)) continue;
+
+    if(fmt.platform==='Qoo10'){
+      // Qoo10は住所が1本の文字列なので分割する
+      const full = g(row,'住所');
+      const sp = splitJpAddress(full);
+      // 電話番号は携帯を優先。「-」だけの欄は空扱い
+      const pick = v => (v && v!=='-') ? v : '';
+      const tel = pick(g(row,'受取人携帯電話番号')) || pick(g(row,'受取人電話番号'))
+               || pick(g(row,'購入者携帯電話番号')) || pick(g(row,'購入者電話番号'));
+      out.push({
+        order,
+        name: g(row,'受取人名') || g(row,'購入者名'),
+        zip:  g(row,'郵便番号'),
+        addr: full,
+        addr1: sp.addr1, addr2: sp.addr2, addr3: sp.addr3,
+        tel,
+        sku: g(row,'販売者商品コード') || g(row,'商品番号'),
+        fullname: g(row,'商品名'),
+        variation: g(row,'オプション情報'),
+        qty: g(row,'数量') || '1',
+        weight: '',
+        source: 'Qoo10',
+      });
+      continue;
+    }
+
+    // --- TikTok Shop ---
     const addr = ['都道府県','市区町村','町名','詳細住所1','詳細住所2']
       .map(k=>g(row,k)).filter(Boolean).join('');
-    // 送り状FMT用の分割住所
     const addr1 = ['都道府県','市区町村','町名'].map(k=>g(row,k)).filter(Boolean).join('');
-    const addr2 = g(row,'詳細住所1');
-    const addr3 = g(row,'詳細住所2');
     out.push({
       order,
       name: g(row,'受取人'),
       zip: g(row,'郵便番号'),
-      addr, addr1, addr2, addr3,
+      addr, addr1,
+      addr2: g(row,'詳細住所1'),
+      addr3: g(row,'詳細住所2'),
       tel: g(row,'電話番号'),
       sku: g(row,'セラーSKU'),
       fullname: g(row,'商品名'),
@@ -520,7 +572,7 @@ function render(){
             `<td rowspan="${n}">${esc(addr)}</td>`+
             `<td class="wt" rowspan="${n}">${w!=null ? w+'kg' : ''}</td>`;
       }
-      th+=`<td class="c src">${esc(r.source==='Amazon'?'AMZ':'TT')}</td>`+
+      th+=`<td class="c src">${esc(SRC_LABEL[r.source]||r.source||'')}</td>`+
           `<td class="ord">${esc(r.order)}</td><td>${esc(r.product)}</td><td class="c">${esc(r.qty)}</td>`;
       if(li===0) th+=`<td class="track" rowspan="${n}"></td>`;
       th+='</tr>';
@@ -587,7 +639,6 @@ const SAGAWA_HEADER = ['お届け先郵便番号','お届け先氏名','お届�
 const SAGAWA_DESC = '以下のようなフォーマットで、データを設定してください。\n\r\n';
 
 const CP_MAX_ROWS = 40;   // 1ファイルあたりの上限件数
-const CP_MAX_LEN  = 20;   // 各住所欄・氏名・内容品の上限文字数
 
 // 郵便番号：半角数字7桁（ハイフンなし）
 function fmtZipPlain(z){
@@ -613,10 +664,21 @@ function fmtTel(t){
 // 未登録SKUは商品名から【…】を除き、先頭の語だけを使って短くする
 function contentName(r){
   if(SKU_SHORT[r.sku]) return SKU_SHORT[r.sku];
-  let s = String(r.fullname||'').replace(/【[^】]*】/g,'').replace(/[（(].*?[)）]/g,'');
-  s = s.replace(/[　\s]+/g,' ').trim();
-  const first = s.split(' ').filter(Boolean).slice(0,2).join(' ');
-  return (first || s || '雑貨');
+  let s = String(r.fullname||'')
+    .replace(/【[^】]*】/g,'')          // 【累計10万袋突破】などの惹句を除去
+    .replace(/[（(][^)）]*[)）]/g,'')
+    .replace(/[＂"”“]/g,'')
+    .replace(/[　\s]+/g,' ').trim();
+  // 20文字に収まる範囲で先頭から語をつなぐ
+  const words = s.split(' ').filter(Boolean);
+  let out = '';
+  for(const w of words){
+    const next = out ? out+' '+w : w;
+    if(next.length > CP_MAX_LEN) break;
+    out = next;
+  }
+  if(!out) out = (words[0]||s).slice(0, CP_MAX_LEN);
+  return out || '雑貨';
 }
 function fmtContent(r){
   const q = parseInt(r.qty)||1;
