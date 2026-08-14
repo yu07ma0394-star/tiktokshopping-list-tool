@@ -74,6 +74,13 @@
   td.chk .chkprint{display:none; font-size:12px;}
   tr.picked td{background:#eef5fd;}
   tr.unpicked td{color:#aaa;}
+  td.nm{padding:2px 4px;}
+  td.nm input{width:100%; font-size:12px; padding:3px 4px; border:1px solid transparent;
+    border-radius:5px; background:transparent;}
+  td.nm input:hover{border-color:var(--line); background:#fff;}
+  td.nm input:focus{border-color:var(--blue); background:#fff; outline:none;}
+  td.nm .nmprint{display:none; font-size:12px;}
+  td.nm-man input{border-color:#f0c36d; background:#fffaf0;}
   th.telh{width:120px;}
   td.tel{padding:2px 4px;}
   td.tel input{width:100%; font-size:11px; padding:3px 4px; border:1px solid var(--line);
@@ -113,6 +120,9 @@
     td.chk .chkprint{display:inline;}
     td.tel input{display:none;}
     td.tel .telprint{display:inline;}
+    td.nm input{display:none;}
+    td.nm .nmprint{display:inline;}
+    td.nm-man{background:#fff !important;}
     td.tel-none,td.tel-fill,td.tel-man{background:#fff !important;}
     tr.picked td{background:#fff !important;}
     tr.unpicked{display:none;}
@@ -168,12 +178,12 @@
             </select>
           </label>
           <label id="descWrap" style="display:none;">
-            <input type="checkbox" id="incDesc" checked> 先頭の説明行を含める
+            <input type="checkbox" id="incDesc"> 先頭の説明行を含める
           </label>
           <button class="act" id="fmtBtn" disabled>📄 送り状FMT作成（CSV）</button>
         </div>
         <div class="bulkrow">
-          <span class="bulklabel">チェックした宛先だけ出力します：</span>
+          <span class="bulklabel">チェックした宛先だけ出力します（宛名・電話番号は一覧で直接修正できます）：</span>
           <button class="mini" data-bulk="all">全選択</button>
           <button class="mini" data-bulk="none">全解除</button>
           <button class="mini" data-bulk="invert">選択を反転</button>
@@ -215,6 +225,7 @@ const SKU_SHORT = {
   'ri_wa01':'二つ折り財布',
   'hp_sh01':'犬用炭酸入浴剤',
   'PB-RIU-FBA-001-L111':'姿勢サポーター', // Amazon
+  'KETSURO_FBM':'結露防止スプレー',           // Amazon
 };
 
 // pdf.js のワーカー設定
@@ -236,7 +247,7 @@ $('genBtn').addEventListener('click', render);
 $('printBtn').addEventListener('click', ()=>window.print());
 $('fmtBtn').addEventListener('click', exportFmt);
 $('clearBtn').addEventListener('click', ()=>{
-  filesData=[]; currentRecs=[]; currentGroups=[]; pickMap={}; telManual={}; telFilled=0; merged=0; renderFileList(); $('output').style.display='none';
+  filesData=[]; currentRecs=[]; currentGroups=[]; pickMap={}; telManual={}; nameManual={}; telFilled=0; merged=0; renderFileList(); $('output').style.display='none';
   $('emptyMsg').style.display='block'; $('emptyMsg').textContent='ファイルを読み込むとここに一覧が表示されます。';
   $('genBtn').disabled=true; $('printBtn').disabled=true; $('fmtBtn').disabled=true;
   fileInput.value='';
@@ -332,15 +343,15 @@ function jpCharCount(s){ return (String(s).match(/[぀-ヿ一-鿿]/g)||[]).lengt
 function pickName(shipName, buyerName){
   const ship = String(shipName||'').trim();
   const buyer = String(buyerName||'').trim();
+  if(!ship)  return buyer;
   if(!buyer) return ship;
-  if(!ship) return buyer;
-  // 発送先の氏名が日本語として成立していない（例：「t」）なら購入者名を使う
+  // 発送先の氏名が日本語として成立していない（例：「t」）ときだけ購入者名を使う
   if(jpCharCount(ship) < 2) return buyer;
-  // どちらかがもう一方を含むなら、情報量の多い方（例：購入者「時吉」／発送先「時吉 保志」）
+  // 片方がもう一方を含むなら情報量の多い方（例：購入者「時吉」／発送先「時吉 保志」）
   const a = ship.replace(/\s/g,''), b = buyer.replace(/\s/g,'');
   if(a.includes(b) || b.includes(a)) return (a.length >= b.length) ? ship : buyer;
-  // 全く別人に見える場合は購入者名を優先
-  return buyer;
+  // それ以外は「お届け先」を採用する。購入者名はAmazonのアカウント名のことがあるため
+  return ship;
 }
 
 function parseAmazonPage(lines){
@@ -371,23 +382,28 @@ function parseAmazonPage(lines){
   const skm=text.match(/SKU[:：]\s*([A-Za-z0-9][A-Za-z0-9\-_.]*)/);
   const sku=skm ? skm[1] : '';
 
-  // 商品名と数量：「1 【商品名…】」形式を優先し、【】が無い納品書にも対応
+  // 商品名と数量：「数量 商品の詳細」行の下から、金額行を除いて明細をつなぐ
   let pnm = '', qty = '';
-  const qm = text.match(/(\d+)\s*【/);
-  if(qm){ qty = qm[1]; }
-  // 「先頭が数量 + 商品名」の行を探す（郵便番号・注文番号の行は除く）
-  const item = lines.find(l=>
-    /^(\d{1,3})\s+\S/.test(l) &&
-    !/^\d{3}-?\d{4}$/.test(l) &&
-    !/注文|SKU|合計|小計|税|円|¥/.test(l)
-  );
-  if(item){
-    const m2 = item.match(/^(\d{1,3})\s+(.+)$/);
-    if(m2){ if(!qty) qty = m2[1]; pnm = m2[2].trim(); }
+  const hdrIdx = lines.findIndex(l=>/^数量\s+商品の詳細/.test(l));
+  if(hdrIdx >= 0){
+    const parts = [];
+    for(let i=hdrIdx+1; i<lines.length; i++){
+      const l = lines[i];
+      if(/^(SKU|ASIN|コンディション|注文商品ID|総計|獲得ポイント|付与された|商品をお買い上げ)/.test(l)) break;
+      if(/^(商品の小計|商品別の合計|消費税を含む|ト$)/.test(l)) continue;
+      let t = l.replace(/[¥￥][\d,]+/g,'').trim();
+      if(!parts.length){
+        const m = t.match(/^(\d{1,3})\s+(.*)$/);
+        if(m){ qty = m[1]; t = m[2].trim(); }
+      }
+      if(t) parts.push(t);
+    }
+    pnm = parts.join('');
   }
-  if(!pnm) pnm = lines.find(l=>l.includes('【')) || '';
-  pnm = pnm.replace(/^\d+\s+/,'').replace(/[¥￥][\d,]+.*$/,'').trim();
-  if(!qty) qty = '1';
+  if(!qty){ const qm = text.match(/(\d+)\s*【/); qty = qm ? qm[1] : '1'; }
+  if(!pnm) pnm = (lines.find(l=>l.includes('【')) || '')
+                  .replace(/^\d+\s+/,'').replace(/[¥￥][\d,]+.*$/,'').trim();
+
   if(!order && !zip && !name) return null;
   const sp = splitJpAddress(addr);
   return {order, name, zip, addr, addr1:sp.addr1, addr2:sp.addr2, addr3:sp.addr3,
@@ -398,19 +414,41 @@ function parseAmazonPage(lines){
 // Amazonの納品書は「文」「山」「口」などを康熙部首(U+2F00〜)やCJK部首補助(U+2E80〜)の
 // 別コードで埋め込んでいる。見た目は同じでもShift_JISに変換できず「?」になるため通常の漢字へ直す。
 const RADICAL_FIX = {
-  '⺦':'丬','⺰':'纟','⻅':'见','⻈':'讠','⻉':'贝',
-  '⻋':'车','⻐':'钅','⻓':'长','⻔':'门','⻙':'韦',
-  '⻚':'页','⻛':'风','⻜':'飞','⻠':'饣','⻢':'马',
-  '⻥':'鱼','⻦':'鸟','⻧':'卤','⻨':'麦','⻩':'黄',
-  '⻪':'黾','⻫':'斉','⻬':'齐','⻭':'歯','⻮':'齿',
-  '⻯':'竜','⻰':'龙','⻲':'亀','⻳':'龟',
+  '⺀':'冫','⺁':'厂','⺂':'乁','⺃':'乚','⺄':'乙','⺅':'人','⺆':'冂','⺇':'几',
+  '⺈':'刀','⺉':'刀','⺊':'卜','⺋':'卩','⺌':'小','⺍':'小','⺎':'尢','⺏':'尢',
+  '⺐':'尢','⺑':'尢','⺒':'巳','⺓':'巛','⺔':'彐','⺕':'彐','⺖':'心','⺗':'心',
+  '⺘':'手','⺙':'攴','⺛':'无','⺜':'日','⺝':'月','⺞':'歹','⺟':'母','⺠':'民',
+  '⺡':'水','⺢':'水','⺣':'火','⺤':'爪','⺥':'爪','⺦':'丬','⺧':'牛','⺨':'犬',
+  '⺩':'玉','⺪':'疋','⺫':'目','⺬':'示','⺭':'示','⺮':'竹','⺯':'糸','⺰':'糸',
+  '⺱':'网','⺲':'网','⺳':'网','⺴':'网','⺵':'网','⺶':'羊','⺷':'羊','⺸':'羊',
+  '⺹':'老','⺺':'聿','⺻':'聿','⺼':'肉','⺽':'臼','⺾':'艸','⺿':'艸','⻀':'艸',
+  '⻁':'虍','⻂':'衣','⻃':'西','⻄':'西','⻅':'見','⻆':'角','⻇':'角','⻈':'言',
+  '⻉':'貝','⻊':'足','⻋':'車','⻌':'辶','⻍':'辵','⻎':'辵','⻏':'邑','⻐':'金',
+  '⻑':'長','⻒':'長','⻓':'長','⻔':'門','⻕':'阜','⻖':'阜','⻗':'雨','⻘':'青',
+  '⻙':'韋','⻚':'頁','⻛':'風','⻜':'飛','⻝':'食','⻞':'食','⻟':'食','⻠':'食',
+  '⻡':'首','⻢':'馬','⻣':'骨','⻤':'鬼','⻥':'魚','⻦':'鳥','⻧':'鹵','⻨':'麦',
+  '⻩':'黄','⻪':'黽','⻫':'斉','⻬':'斉','⻭':'歯','⻮':'歯','⻯':'竜','⻰':'竜',
+  '⻱':'亀','⻲':'亀','⻳':'亀',
 };
+
+// NFKCで半角化されるとShift_JISに無くなる文字を戻す
+const SJIS_SAFE_FIX = {
+  '¥':'￥',   // ¥ → ￥
+  '‧':'・',   // ‧ → ・
+  '‐':'-', '‑':'-', '‒':'-', '–':'-', '—':'-',
+  '―':'-', '−':'-', '­':'',
+  '‘':"'", '’':"'", '“':'"', '”':'"',
+};
+
 function normalizeJp(str){
   let t = String(str==null?'':str);
   // 康熙部首(U+2F00〜U+2FD5)や全角英数はNFKCで通常の文字に戻る
   try{ t = t.normalize('NFKC'); }catch(e){}
   // NFKCで戻らないCJK部首補助を個別に置換
-  t = t.replace(/[⺀-⻳]/g, c => RADICAL_FIX[c] || c);
+  t = t.replace(/[\u2E80-\u2EF3]/g, c => RADICAL_FIX[c] || c);
+  // Shift_JISに無い記号を安全な文字へ
+  t = t.replace(/[\u00A5\u00AD\u2010-\u2015\u2018\u2019\u201C\u201D\u2027\u2212]/g,
+                c => (c in SJIS_SAFE_FIX) ? SJIS_SAFE_FIX[c] : c);
   return t;
 }
 
@@ -592,11 +630,13 @@ function fmtZip(z, hyphen){
 // 宛先ごとのチェック状態を保持（key = 宛名|〒|住所）
 let pickMap = {};
 let telManual = {};   // 一覧で手入力した電話番号
+let nameManual = {};  // 一覧で修正した宛名
 let telFilled = 0;    // 注文レポートから補完できた件数
 let merged = 0;       // 別ファイルの同一注文を統合した件数
 let currentGroups = [];
 
-function groupKey(r){ return r.name+'|'+r.zip+'|'+r.addr; }
+// 宛先の識別キー。宛名は編集できるようにするため、郵便番号＋住所で識別する
+function groupKey(r){ return r.zip+'|'+r.addr; }
 
 // この宛先が出力対象か（初期値はチェックON）
 function isPicked(r){ const k=groupKey(r); return pickMap[k] !== false; }
@@ -660,10 +700,12 @@ function render(){
     if(!fmtTel(r.tel) && telByOrder[r.order]){ r.tel = telByOrder[r.order]; r.telFrom='report'; telFilled++; }
   });
 
-  // 一覧で手入力された電話番号を最優先で反映
+  // 一覧で手入力された電話番号・宛名を最優先で反映
   recs.forEach(r=>{
-    const manual = telManual[groupKey(r)];
+    const k = groupKey(r);
+    const manual = telManual[k];
     if(manual){ r.tel = manual; r.telFrom='manual'; }
+    if(nameManual[k]){ r.name = nameManual[k]; r.nameFrom='manual'; }
   });
 
   currentRecs = recs;
@@ -701,6 +743,7 @@ function render(){
     const w = groupWeight(gp.items);
     const box = `<input type="checkbox" class="pickbox" data-key="${esc(gp.key)}"${on?' checked':''}>`+
                 `<span class="chkprint">${on?'✓':''}</span>`;
+    const nameCls = gp.items.some(r=>r.nameFrom==='manual') ? 'nm-man' : '';
     const telSrc = gp.items.find(r=>fmtTel(r.tel));
     const telVal = telSrc ? fmtTel(telSrc.tel) : '';
     const telCls = !telVal ? 'tel-none' : (telSrc.telFrom==='report' ? 'tel-fill'
@@ -710,7 +753,9 @@ function render(){
       if(li===0){
         th+=`<td class="chk" rowspan="${n}">${box}</td>`+
             `<td class="c" rowspan="${n}">${gi+1}</td>`+
-            `<td rowspan="${n}">${esc(gp.name)}</td>`+
+            `<td class="nm ${nameCls}" rowspan="${n}">`+
+              `<input type="text" class="namebox" data-key="${esc(gp.key)}" value="${esc(gp.name)}">`+
+              `<span class="nmprint">${esc(gp.name)}</span></td>`+
             `<td rowspan="${n}">${esc(addr)}</td>`+
             `<td class="tel ${telCls}" rowspan="${n}">`+
               `<input type="text" class="telbox" data-key="${esc(gp.key)}" value="${esc(telVal)}" placeholder="未取得">`+
@@ -725,6 +770,15 @@ function render(){
   });
   th+='</tbody></table>';
   $('listTable').innerHTML=th;
+
+  $('listTable').querySelectorAll('.namebox').forEach(box=>{
+    box.addEventListener('change', e=>{
+      const key = e.target.dataset.key, v = e.target.value.trim();
+      if(v) nameManual[key] = v; else delete nameManual[key];
+      // 再描画はイベント処理の後に回す（入力欄が消える瞬間のDOM衝突を避ける）
+      setTimeout(()=>{ render(); $('fmtWarn').style.display='none'; }, 0);
+    });
+  });
 
   $('listTable').querySelectorAll('.telbox').forEach(box=>{
     box.addEventListener('change', e=>{
@@ -1075,7 +1129,9 @@ function exportFmt(){
 
     let html = `<b>佐川急便 取込CSVを ${rows.length} 件出力しました</b>`;
     html += `テンプレートと同じ9列・全項目ダブルクォート・${enc==='sjis'?'Shift_JIS':'UTF-8（BOM付き）'}で出力しています。<br>`;
-    if(!$('incDesc').checked) html += '先頭の説明行は省いています。取込でエラーが出る場合はチェックを入れ直してください。<br>';
+    html += $('incDesc').checked
+      ? 'テンプレート先頭の説明行を含めています。ヘッダー行しか取り込まれない場合はチェックを外してください。<br>'
+      : 'テンプレート先頭の説明行は省いています（1行目がヘッダー）。<br>';
     if(skipped) html += `チェックの入っていない ${skipped} 件は含んでいません。<br>`;
     if(warns.length){
       html += `要確認 ${warns.length} 件：<br>・` + warns.map(esc).join('<br>・');
@@ -1142,7 +1198,7 @@ document.querySelectorAll('button[data-bulk]').forEach(btn=>{
 
 const FMT_NOTES = {
   clickpost: 'クリックポスト公式CSV（8列 / Shift_JIS / 1ファイル40件まで / 住所各欄20文字以内）で出力します。ヘッダー行はそのまま残してアップロードしてください。',
-  sagawa: '佐川の取込テンプレート（9列 / UTF-8 BOM付き / 全項目ダブルクォート）と同じ形で出力します。電話番号は必須です。',
+  sagawa: '佐川の取込テンプレート（9列 / UTF-8 BOM付き / 全項目ダブルクォート）と同じ形で出力します。1行目がヘッダー行です。電話番号は必須です。',
   generic: 'スプレッドシート「手入力」シートと同じ11列で出力します。配送方法列には上で選んだ業者が入るので、佐川はここから伝票を作成してください。'
 };
 function updateFmtNote(){
