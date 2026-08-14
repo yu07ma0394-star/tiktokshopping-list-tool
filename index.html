@@ -33,6 +33,7 @@
   .drop small{display:block; color:var(--gray); margin-top:6px;}
   #fileInput{display:none;}
   .files{margin-top:12px; font-size:13px;}
+  .files .f.tpl{background:#eefaf1; border-color:#8fce9f; color:#1f6b38; font-weight:bold;}
   .files .f{display:inline-flex; align-items:center; gap:6px; background:var(--blue-xl);
     border:1px solid var(--blue-l); border-radius:20px; padding:4px 12px; margin:3px 4px 0 0;}
   .files .f button{border:none; background:none; color:var(--gray); cursor:pointer; font-size:15px; line-height:1;}
@@ -140,7 +141,7 @@
     <div class="panel">
       <div class="drop" id="drop">
         <b>ファイルをドラッグ＆ドロップ</b>、またはクリックして選択<br>
-        <small>.xlsx / .xls / .csv / .tsv / .txt / .pdf（複数選択・追加読み込みOK）<br>TikTok Shop・Qoo10 の注文一覧、Amazon の納品書PDF・注文レポートに対応</small>
+        <small>.xlsx / .xls / .csv / .tsv / .txt / .pdf（複数選択・追加読み込みOK）<br>TikTok Shop・Qoo10 の注文一覧、Amazon の納品書PDF・注文レポートに対応<br>送り状の取込テンプレート（見出しだけのCSV）を入れると、その列構成に合わせて出力します</small>
       </div>
       <input type="file" id="fileInput" multiple accept=".xlsx,.xls,.csv,.tsv,.txt,.pdf">
       <div class="files" id="fileList"></div>
@@ -176,6 +177,9 @@
               <option value="sjis">Shift_JIS（クリックポストはこれ）</option>
               <option value="utf8">UTF-8 BOM付き（佐川・スプレッドシートはこれ）</option>
             </select>
+          </label>
+          <label id="zipWrap" style="display:none;">
+            <input type="checkbox" id="zipHyphen" checked> 郵便番号にハイフンを入れる
           </label>
           <label id="descWrap" style="display:none;">
             <input type="checkbox" id="incDesc"> 先頭の説明行を含める
@@ -232,6 +236,7 @@ const SKU_SHORT = {
 if(window.pdfjsLib){ pdfjsLib.GlobalWorkerOptions.workerSrc='https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js'; }
 
 let filesData = []; // {name, rows:[{...}]}
+let okurijoTpl = null;  // 読み込んだ送り状テンプレート {name, cols[], descLines[]}
 let currentRecs = []; // 直近に作成したリストの明細（送り状FMT出力用）
 
 const $ = id => document.getElementById(id);
@@ -247,7 +252,7 @@ $('genBtn').addEventListener('click', render);
 $('printBtn').addEventListener('click', ()=>window.print());
 $('fmtBtn').addEventListener('click', exportFmt);
 $('clearBtn').addEventListener('click', ()=>{
-  filesData=[]; currentRecs=[]; currentGroups=[]; pickMap={}; telManual={}; nameManual={}; telFilled=0; merged=0; renderFileList(); $('output').style.display='none';
+  filesData=[]; currentRecs=[]; currentGroups=[]; pickMap={}; telManual={}; nameManual={}; telFilled=0; merged=0; renderFileList();  // テンプレートは残す $('output').style.display='none';
   $('emptyMsg').style.display='block'; $('emptyMsg').textContent='ファイルを読み込むとここに一覧が表示されます。';
   $('genBtn').disabled=true; $('printBtn').disabled=true; $('fmtBtn').disabled=true;
   fileInput.value='';
@@ -285,6 +290,31 @@ function parseCSV(text, delim){
   return rows;
 }
 
+// 送り状の取込テンプレート（見出しだけのCSV）かどうかを判定する
+const TPL_KEYS = ['お届け先郵便番号','郵便番号','お届け先氏名','お届け先名称1'];
+function detectOkurijoTemplate(aoa, fileName){
+  let hdrIdx = -1;
+  for(let i=0;i<Math.min(aoa.length,6);i++){
+    const row = (aoa[i]||[]).map(x=>String(x).trim());
+    const hit = TPL_KEYS.filter(k=>row.includes(k)).length;
+    if(hit >= 2 || (row.includes('お届け先郵便番号') && row.length>=5)){ hdrIdx=i; break; }
+  }
+  if(hdrIdx < 0) return null;
+
+  const cols = aoa[hdrIdx].map(x=>String(x).trim()).filter(x=>x!=='');
+  // 見出しの下に実データ（郵便番号らしき値）が並んでいるならテンプレートではない
+  const body = aoa.slice(hdrIdx+1).filter(r=>r && r.some(c=>String(c).trim()!==''));
+  const zipIdx = aoa[hdrIdx].findIndex(x=>/郵便番号/.test(String(x)));
+  const hasData = body.some(r=>/^\d{3}-?\d{4}$/.test(String(r[zipIdx]||'').replace(/^'/,'').trim()));
+  if(hasData) return null;
+
+  // 見出しより前の行（説明行）は、そのまま再現できるよう保持しておく
+  const descLines = aoa.slice(0, hdrIdx)
+    .map(r=>(r||[]).join(',').trim()).filter(Boolean);
+
+  return {name:fileName, cols, descLines};
+}
+
 async function handleFiles(fileList){
   const arr = Array.from(fileList);
   if(!arr.length) return;
@@ -299,7 +329,10 @@ async function handleFiles(fileList){
         rows = await parsePDF(buf);
       }else if(/\.(csv|tsv|txt)$/i.test(file.name)){
         const text = new TextDecoder('utf-8').decode(new Uint8Array(buf));
-        rows = parseSheet(parseCSV(text, detectDelimiter(text)));
+        const aoa = parseCSV(text, detectDelimiter(text));
+        const tpl = detectOkurijoTemplate(aoa, file.name);
+        if(tpl){ okurijoTpl = tpl; renderFileList(); updateFmtNote(); if(filesData.length) render(); continue; }
+        rows = parseSheet(aoa);
       }else{
         const wb = XLSX.read(new Uint8Array(buf), {type:'array'});
         const ws = wb.Sheets[wb.SheetNames[0]];
@@ -310,7 +343,7 @@ async function handleFiles(fileList){
       alert('読み込みエラー: '+file.name+'\n'+err.message);
     }
   }
-  renderFileList(); $('genBtn').disabled=false; render();
+  renderFileList(); $('genBtn').disabled = !filesData.length; if(filesData.length) render();
 }
 
 // Amazon 納品書PDF（1ページ＝1注文）を解析
@@ -863,6 +896,12 @@ const SAGAWA_DESC = '以下のようなフォーマットで、データを設�
 const CP_MAX_ROWS = 40;   // 1ファイルあたりの上限件数
 
 // 郵便番号：半角数字7桁（ハイフンなし）
+// 佐川など、郵便番号をハイフン付き8桁で受け取るシステム向け
+function fmtZipHyphen(z){
+  const d = fmtZipPlain(z);
+  return d.length===7 ? d.slice(0,3)+'-'+d.slice(3) : d;
+}
+
 function fmtZipPlain(z){
   return toHalf(String(z||'')).replace(/[^0-9]/g,'');
 }
@@ -984,8 +1023,45 @@ function buildClickpostRows(recs){
   return {rows, warns};
 }
 
+// テンプレートの列名から値を作る。知らない列名は空欄にする
+function templateValue(colName, ctx){
+  const c = String(colName).replace(/\s/g,'');
+  const num = c.match(/住所([1-4１-４])行目/) || c.match(/住所([1-4１-４])$/);
+  if(num){
+    const i = '1234'.indexOf(num[1].replace(/[１-４]/, d=>String.fromCharCode(d.charCodeAt(0)-0xFEE0)));
+    return ctx.addr[i] || '';
+  }
+  if(/郵便番号/.test(c)) return ctx.zip;
+  if(/敬称/.test(c)) return '様';
+  if(/(氏名|名称1|名称１|宛名|受取人)/.test(c)) return ctx.name;
+  if(/電話/.test(c)) return ctx.tel;
+  if(/(品名|内容品|商品名)/.test(c)) return ctx.item;
+  if(/配送方法|便種|スピード/.test(c)) return ctx.method;
+  if(/(出荷個数|個数|数量)/.test(c)) return ctx.qty;
+  if(/(注文番号|注文ID|お客様管理番号|管理番号)/.test(c)) return ctx.order;
+  if(/(都道府県|市区町村)/.test(c)) return ctx.addr[0] || '';
+  return '';   // 出力ステータスなど、こちらで埋めない列
+}
+
+// テンプレートの列構成に合わせて1行を作る
+function buildTemplateRow(r, method){
+  const {lines} = packAddress(r, CP_MAX_LEN);
+  const hy = $('zipHyphen') && $('zipHyphen').checked;
+  const ctx = {
+    zip: hy ? fmtZipHyphen(r.zip) : fmtZipPlain(r.zip),
+    name: String(r.name||'').trim(),
+    tel: fmtTel(r.tel),
+    item: fmtContent(r) || '雑貨',
+    addr: lines,
+    method: method || '',
+    qty: String(parseInt(r.qty)||1),
+    order: String(r.order||''),
+  };
+  return okurijoTpl.cols.map(c=>templateValue(c, ctx));
+}
+
 // --- 佐川急便 取込CSV用の行を作る ---
-function buildSagawaRows(recs){
+function buildSagawaRows(recs, useTpl){
   const rows=[]; const warns=[];
 
   const dup={};
@@ -1006,7 +1082,9 @@ function buildSagawaRows(recs){
     if(!tel) warns.push(`${r.order}：電話番号がありません（佐川は必須）${r.source==='Amazon'?'／セラーセントラルの注文レポートを一緒に読み込むか、一覧の電話番号欄に直接入力してください':''}`);
     if(overflow.length) warns.push(`${r.order}：住所が4欄に収まらず末尾を切り捨てました（${overflow.join(' / ')}）`);
 
-    rows.push([zip, name, '様', lines[0], lines[1], lines[2], lines[3], tel, item]);
+    const zipOut = ($('zipHyphen') && $('zipHyphen').checked) ? fmtZipHyphen(r.zip) : zip;
+    rows.push(useTpl ? buildTemplateRow(r, '佐川急便')
+                     : [zipOut, name, '様', lines[0], lines[1], lines[2], lines[3], tel, item]);
   });
   return {rows, warns};
 }
@@ -1122,13 +1200,21 @@ function exportFmt(){
   }
 
   if(mode==='sagawa'){
-    const {rows, warns} = buildSagawaRows(target);
-    const body = toQuotedCSV([SAGAWA_HEADER, ...rows]);
-    const csv = $('incDesc').checked ? (SAGAWA_DESC + body) : body;
+    const useTpl = !!okurijoTpl;
+    const cols = useTpl ? okurijoTpl.cols : SAGAWA_HEADER;
+    const {rows, warns} = buildSagawaRows(target, useTpl);
+    const body = toQuotedCSV([cols, ...rows]);
+    const desc = useTpl
+      ? (okurijoTpl.descLines.length ? okurijoTpl.descLines.join('\n')+'\n\r\n' : SAGAWA_DESC)
+      : SAGAWA_DESC;
+    const csv = $('incDesc').checked ? (desc + body) : body;
     downloadCSV(csv, `佐川_${ts}.csv`, enc);
 
     let html = `<b>佐川急便 取込CSVを ${rows.length} 件出力しました</b>`;
-    html += `テンプレートと同じ9列・全項目ダブルクォート・${enc==='sjis'?'Shift_JIS':'UTF-8（BOM付き）'}で出力しています。<br>`;
+    const zipFmt = ($('zipHyphen').checked ? '郵便番号はハイフン付き（例 857-0103）' : '郵便番号はハイフンなし（例 8570103）');
+    html += useTpl
+      ? `読み込んだテンプレート「${esc(okurijoTpl.name)}」の${cols.length}列に合わせて出力しています（${enc==='sjis'?'Shift_JIS':'UTF-8 BOM付き'}・全項目ダブルクォート・${zipFmt}）。<br>`
+      : `テンプレートと同じ9列・全項目ダブルクォート・${enc==='sjis'?'Shift_JIS':'UTF-8（BOM付き）'}・${zipFmt}で出力しています。<br>`;
     html += $('incDesc').checked
       ? 'テンプレート先頭の説明行を含めています。ヘッダー行しか取り込まれない場合はチェックを外してください。<br>'
       : 'テンプレート先頭の説明行は省いています（1行目がヘッダー）。<br>';
@@ -1198,14 +1284,22 @@ document.querySelectorAll('button[data-bulk]').forEach(btn=>{
 
 const FMT_NOTES = {
   clickpost: 'クリックポスト公式CSV（8列 / Shift_JIS / 1ファイル40件まで / 住所各欄20文字以内）で出力します。ヘッダー行はそのまま残してアップロードしてください。',
-  sagawa: '佐川の取込テンプレート（9列 / UTF-8 BOM付き / 全項目ダブルクォート）と同じ形で出力します。1行目がヘッダー行です。電話番号は必須です。',
+  sagawa: '',   // updateFmtNote で内容を組み立てる
   generic: 'スプレッドシート「手入力」シートと同じ11列で出力します。配送方法列には上で選んだ業者が入るので、佐川はここから伝票を作成してください。'
 };
 function updateFmtNote(){
   const mode=$('fmtMode').value;
-  $('fmtNote').textContent = FMT_NOTES[mode]||'';
+  let note = FMT_NOTES[mode]||'';
+  if(mode==='sagawa'){
+    note = okurijoTpl
+      ? `テンプレート「${okurijoTpl.name}」の${okurijoTpl.cols.length}列（${okurijoTpl.cols.join(' / ')}）に合わせて出力します。電話番号は必須です。`
+      : '佐川の取込テンプレート（9列 / UTF-8 BOM付き / 全項目ダブルクォート）と同じ形で出力します。1行目がヘッダー行です。テンプレートCSVを読み込ませると、その列構成に自動で合わせます。';
+    note += ' 郵便番号は857-0103のようなハイフン付きで出します（下4桁が0000になる場合はこの設定を確認してください）。';
+  }
+  $('fmtNote').textContent = note;
   $('methodWrap').style.display = (mode==='generic') ? '' : 'none';
   $('descWrap').style.display   = (mode==='sagawa') ? '' : 'none';
+  $('zipWrap').style.display    = (mode==='sagawa') ? '' : 'none';
   $('csvEnc').value = (mode==='clickpost') ? 'sjis' : 'utf8';
   $('fmtWarn').style.display='none';
 }
@@ -1214,11 +1308,16 @@ updateFmtNote();
 
 function renderFileList(){
   const el=$('fileList');
-  if(!filesData.length){ el.innerHTML=''; return; }
-  el.innerHTML = filesData.map((f,i)=>
+  const tpl = okurijoTpl
+    ? `<span class="f tpl">🧾 送り状テンプレート: ${esc(okurijoTpl.name)} <small>(${okurijoTpl.cols.length}列)</small>`+
+      `<button data-tpl="1" title="解除">×</button></span>`
+    : '';
+  if(!filesData.length && !tpl){ el.innerHTML=''; return; }
+  el.innerHTML = tpl + filesData.map((f,i)=>
     `<span class="f">📄 ${esc(f.name)} <small>(${f.rows.length}件)</small> <button data-i="${i}" title="削除">×</button></span>`
   ).join('');
   el.querySelectorAll('button').forEach(b=>b.addEventListener('click',e=>{
+    if(e.target.dataset.tpl){ okurijoTpl=null; renderFileList(); updateFmtNote(); if(filesData.length) render(); return; }
     filesData.splice(+e.target.dataset.i,1); renderFileList();
     if(filesData.length) render(); else $('clearBtn').click();
   }));
