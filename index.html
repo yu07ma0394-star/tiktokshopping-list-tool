@@ -34,6 +34,7 @@
   #fileInput{display:none;}
   .files{margin-top:12px; font-size:13px;}
   .files .f.tpl{background:#eefaf1; border-color:#8fce9f; color:#1f6b38; font-weight:bold;}
+  .files .f.tel{background:#fff7e6; border-color:#f0c36d; color:#7a5200; font-weight:bold;}
   .files .f{display:inline-flex; align-items:center; gap:6px; background:var(--blue-xl);
     border:1px solid var(--blue-l); border-radius:20px; padding:4px 12px; margin:3px 4px 0 0;}
   .files .f button{border:none; background:none; color:var(--gray); cursor:pointer; font-size:15px; line-height:1;}
@@ -141,7 +142,8 @@
     <div class="panel">
       <div class="drop" id="drop">
         <b>ファイルをドラッグ＆ドロップ</b>、またはクリックして選択<br>
-        <small>.xlsx / .xls / .csv / .tsv / .txt / .pdf（複数選択・追加読み込みOK）<br>TikTok Shop・Qoo10 の注文一覧、Amazon の納品書PDF・注文レポートに対応<br>送り状の取込テンプレート（見出しだけのCSV）を入れると、その列構成に合わせて出力します</small>
+        <small>.xlsx / .xls / .csv / .tsv / .txt / .pdf（複数選択・追加読み込みOK）<br>TikTok Shop・Qoo10 の注文一覧、Amazon の納品書PDF・注文レポートに対応<br>送り状の取込テンプレート（見出しだけのCSV）を入れると、その列構成に合わせて出力します<br>
+        Amazonの納品書PDFには電話番号が無いため、佐川を使う場合は「FBM未出荷注文レポート」も一緒に入れてください</small>
       </div>
       <input type="file" id="fileInput" multiple accept=".xlsx,.xls,.csv,.tsv,.txt,.pdf">
       <div class="files" id="fileList"></div>
@@ -237,6 +239,7 @@ if(window.pdfjsLib){ pdfjsLib.GlobalWorkerOptions.workerSrc='https://cdnjs.cloud
 
 let filesData = []; // {name, rows:[{...}]}
 let okurijoTpl = null;  // 読み込んだ送り状テンプレート {name, cols[], descLines[]}
+let phoneSrc = null;    // 電話番号の補完ソース {name, map:{注文番号→電話番号}, count}
 let currentRecs = []; // 直近に作成したリストの明細（送り状FMT出力用）
 
 const $ = id => document.getElementById(id);
@@ -290,6 +293,44 @@ function parseCSV(text, delim){
   return rows;
 }
 
+// 注文番号と電話番号の列を持つ表なら、電話番号の補完ソースとして取り込む。
+// Amazonの「FBM未出荷注文レポート」など、列構成や見出しの言語が違っても拾えるようにする。
+const ORDER_COL_RE = /^(order-id|amazon-order-id|注文番号|注文ID|order_id|orderid)$/i;
+const TEL_COL_RE   = /(phone|電話)/i;
+const TEL_EXCLUDE  = /(出品者|販売者|seller|荷送人|ご依頼主|依頼主|店舗)/;
+
+function detectPhoneSource(aoa, fileName){
+  let hdrIdx = -1, oCol = -1, tCols = [];
+  for(let i=0;i<Math.min(aoa.length,6);i++){
+    const row = (aoa[i]||[]).map(x=>String(x).trim());
+    const o = row.findIndex(h=>ORDER_COL_RE.test(h));
+    if(o < 0) continue;
+    const t = [];
+    row.forEach((h,j)=>{ if(h && TEL_COL_RE.test(h) && !TEL_EXCLUDE.test(h)) t.push(j); });
+    if(t.length){ hdrIdx=i; oCol=o; tCols=t; break; }
+  }
+  if(hdrIdx < 0) return null;
+
+  // 「お届け先/配送先」の電話番号を優先、無ければ最初に見つかった電話番号列
+  const header = aoa[hdrIdx].map(x=>String(x).trim());
+  const prefer = tCols.find(j=>/(ship|お届け先|配送先|送付先|受取)/i.test(header[j]));
+  const order = [prefer, ...tCols].filter(j=>j!=null && j>=0);
+
+  const map = {};
+  let n = 0;
+  for(let i=hdrIdx+1;i<aoa.length;i++){
+    const row = aoa[i]; if(!row) continue;
+    const id = String(row[oCol]==null?'':row[oCol]).trim().replace(/^'/,'');
+    if(!/^[\d-]{8,}$/.test(id)) continue;
+    for(const j of order){
+      const v = String(row[j]==null?'':row[j]).trim();
+      if(v && v!=='-' && fmtTel(v)){ if(!map[id]){ map[id]=v; n++; } break; }
+    }
+  }
+  if(!n) return null;
+  return {name:fileName, map, count:n, col:header[order[0]]||'電話番号'};
+}
+
 // 送り状の取込テンプレート（見出しだけのCSV）かどうかを判定する
 const TPL_KEYS = ['お届け先郵便番号','郵便番号','お届け先氏名','お届け先名称1','お届け先名称１','お届け先電話番号','お届け先住所1','お届け先住所１'];
 function detectOkurijoTemplate(aoa, fileName){
@@ -333,10 +374,19 @@ async function handleFiles(fileList){
         const tpl = detectOkurijoTemplate(aoa, file.name);
         if(tpl){ okurijoTpl = tpl; renderFileList(); updateFmtNote(); if(filesData.length) render(); continue; }
         rows = parseSheet(aoa);
+        if(!rows.length){
+          const ps = detectPhoneSource(aoa, file.name);
+          if(ps){ phoneSrc = ps; renderFileList(); if(filesData.length) render(); continue; }
+        }
       }else{
         const wb = XLSX.read(new Uint8Array(buf), {type:'array'});
         const ws = wb.Sheets[wb.SheetNames[0]];
-        rows = parseSheet(XLSX.utils.sheet_to_json(ws, {header:1, defval:''}));
+        const aoa = XLSX.utils.sheet_to_json(ws, {header:1, defval:''});
+        rows = parseSheet(aoa);
+        if(!rows.length){
+          const ps = detectPhoneSource(aoa, file.name);
+          if(ps){ phoneSrc = ps; renderFileList(); if(filesData.length) render(); continue; }
+        }
       }
       filesData.push({name:file.name, rows});
     }catch(err){
@@ -711,23 +761,32 @@ function render(){
   // 納品書PDFと注文レポートのように、同じ注文が別ファイルから重複して入った場合は1件に統合する
   // （同一ファイル内は統合しない＝1注文に複数商品があるケースを壊さないため）
   merged = 0; telFilled = 0;
-  const seen = {};
+  const seen = {};      // 注文番号+SKU
+  const seenOrder = {}; // 注文番号だけ
   const uniq = [];
   recs.forEach(r=>{
     const key = r.order + '|' + (r.sku||'');
-    const prev = seen[key];
+    let prev = seen[key];
+    // 注文レポートのようにSKUが入っていない表と突き合わせるため、
+    // どちらかにSKUが無い場合は注文番号だけで同じ注文とみなす
+    if(!prev){
+      const cand = seenOrder[r.order];
+      if(cand && (!r.sku || !cand.sku)) prev = cand;
+    }
     if(prev && prev.fileIdx !== r.fileIdx){
       mergeRecord(prev, r);
       merged++;
       return;
     }
     seen[key] = r;
+    if(!seenOrder[r.order]) seenOrder[r.order] = r;
     uniq.push(r);
   });
   recs = uniq;
 
-  // 注文番号で電話番号を横断的に補完（納品書PDF ← 注文レポート）
+  // 注文番号で電話番号を横断的に補完（納品書PDF ← 注文レポート／電話番号ソース）
   const telByOrder = {};
+  if(phoneSrc) Object.keys(phoneSrc.map).forEach(k=>{ telByOrder[k] = phoneSrc.map[k]; });
   recs.forEach(r=>{ const t = fmtTel(r.tel); if(t && !telByOrder[r.order]) telByOrder[r.order] = r.tel; });
   recs.forEach(r=>{
     if(!fmtTel(r.tel) && telByOrder[r.order]){ r.tel = telByOrder[r.order]; r.telFrom='report'; telFilled++; }
@@ -886,10 +945,19 @@ const GENERIC_HEADER = ['配送方法','郵便番号','お届け先氏名','敬�
 const CLICKPOST_HEADER = ['お届け先郵便番号','お届け先氏名','お届け先敬称',
   'お届け先住所1行目','お届け先住所2行目','お届け先住所3行目','お届け先住所4行目','内容品'];
 
-// --- 佐川急便 取込CSVの列順（テンプレート okurijo_torikomi_format.csv と同一） ---
-const SAGAWA_HEADER = ['お届け先郵便番号','お届け先氏名','お届け先敬称',
-  'お届け先住所1行目','お届け先住所2行目','お届け先住所3行目','お届け先住所4行目',
-  '電話番号','品名１'];
+// --- 佐川急便 取込CSVの列順（e飛伝レイアウト 75列）---
+// 佐川は列名ではなく「列の位置」で読むため、列数と順番が1つ違うと全項目がずれる。
+// テンプレートを読み込ませればそちらが優先される。
+const SAGAWA_HEADER = [
+  'お届け先コード取得区分','お届け先コード','お届け先電話番号','お届け先郵便番号','お届け先住所１','お届け先住所２','お届け先住所３','お届け先名称１',
+  'お届け先名称２','お客様管理番号','お客様コード','部署ご担当者コード取得区分','部署ご担当者コード','部署ご担当者名称','荷送人電話番号','ご依頼主コード取得区分',
+  'ご依頼主コード','ご依頼主電話番号','ご依頼主郵便番号','ご依頼主住所１','ご依頼主住所２','ご依頼主名称１','ご依頼主名称２','荷姿','品名１','品名２',
+  '品名３','品名４','品名５','荷札荷姿','荷札品名１','荷札品名２','荷札品名３','荷札品名４','荷札品名５','荷札品名６','荷札品名７','荷札品名８',
+  '荷札品名９','荷札品名１０','荷札品名１１','出荷個数','スピード指定','クール便指定','配達日','配達指定時間帯','配達指定時間（時分）','代引金額','消費税',
+  '決済種別','保険金額','指定シール１','指定シール２','指定シール３','営業所受取','SRC区分','営業所受取営業所コード','元着区分','メールアドレス',
+  'ご不在時連絡先','出荷予定日','セット数','お問い合せ送り状No.','出荷場印字区分','集約解除指定','編集０１','編集０２','編集０３','編集０４','編集０５',
+  '編集０６','編集０７','編集０８','編集０９','編集１０',
+];
 // テンプレート先頭にある説明行（1行目はLF、2行目は空行）
 const SAGAWA_DESC = '以下のようなフォーマットで、データを設定してください。\n\r\n';
 
@@ -1000,10 +1068,10 @@ function buildClickpostRows(recs){
   const rows=[]; const warns=[];
 
   // 同じ宛先が複数明細ある場合は送り状が枚数分できてしまうので知らせる
-  const dup={};
-  recs.forEach(r=>{ const k=groupKey(r); dup[k]=(dup[k]||0)+1; });
+  const dup={}, dupName={};
+  recs.forEach(r=>{ const k=groupKey(r); dup[k]=(dup[k]||0)+1; if(!dupName[k]) dupName[k]=r.name||k; });
   Object.keys(dup).filter(k=>dup[k]>1).forEach(k=>{
-    warns.push(`${k.split('|')[0]} 様：同じ宛先で ${dup[k]} 明細あるため送り状も ${dup[k]} 枚になります（1個口にまとめる場合は不要な行を削除してください）`);
+    warns.push(`${dupName[k]} 様：同じ宛先で ${dup[k]} 明細あるため送り状も ${dup[k]} 枚になります（1個口にまとめる場合は不要な行を削除してください）`);
   });
 
   recs.forEach(r=>{
@@ -1072,16 +1140,16 @@ function templateValue(colName, ctx){
 }
 
 // このテンプレートで実際に値が入る列を調べる（出力後の確認表示用）
-function templateFilledCols(){
-  if(!okurijoTpl) return [];
+function templateFilledCols(cols){
+  const list = cols || (okurijoTpl ? okurijoTpl.cols : SAGAWA_HEADER);
   const dummy = {zip:'1000001', name:'山田 太郎', tel:'09012345678', item:'商品',
                  addr:['東京都千代田区千代田','1-1','ビル101',''], method:'佐川急便',
                  qty:'1', pieces:'1', order:'000-0000000-0000000'};
-  return okurijoTpl.cols.filter(c=>templateValue(c, dummy) !== '');
+  return list.filter(c=>templateValue(c, dummy) !== '');
 }
 
-// テンプレートの列構成に合わせて1行を作る
-function buildTemplateRow(r, method){
+// 指定された列構成に合わせて1行を作る
+function buildRowForCols(cols, r, method){
   const {lines} = packAddress(r, CP_MAX_LEN);
   const hy = $('zipHyphen') && $('zipHyphen').checked;
   const ctx = {
@@ -1096,17 +1164,17 @@ function buildTemplateRow(r, method){
 
     order: String(r.order||''),
   };
-  return okurijoTpl.cols.map(c=>templateValue(c, ctx));
+  return cols.map(c=>templateValue(c, ctx));
 }
 
 // --- 佐川急便 取込CSV用の行を作る ---
 function buildSagawaRows(recs, useTpl){
   const rows=[]; const warns=[];
 
-  const dup={};
-  recs.forEach(r=>{ const k=groupKey(r); dup[k]=(dup[k]||0)+1; });
+  const dup={}, dupName={};
+  recs.forEach(r=>{ const k=groupKey(r); dup[k]=(dup[k]||0)+1; if(!dupName[k]) dupName[k]=r.name||k; });
   Object.keys(dup).filter(k=>dup[k]>1).forEach(k=>{
-    warns.push(`${k.split('|')[0]} 様：同じ宛先で ${dup[k]} 明細あるため送り状も ${dup[k]} 枚になります（1個口にまとめる場合は不要な行を削除してください）`);
+    warns.push(`${dupName[k]} 様：同じ宛先で ${dup[k]} 明細あるため送り状も ${dup[k]} 枚になります（1個口にまとめる場合は不要な行を削除してください）`);
   });
 
   recs.forEach(r=>{
@@ -1118,12 +1186,11 @@ function buildSagawaRows(recs, useTpl){
 
     if(zip.length!==7) warns.push(`${r.order}：郵便番号が7桁ではありません（${r.zip||'空欄'}）`);
     if(!name) warns.push(`${r.order}：お届け先氏名が空欄です`);
-    if(!tel) warns.push(`${r.order}：電話番号がありません（佐川は必須）${r.source==='Amazon'?'／セラーセントラルの注文レポートを一緒に読み込むか、一覧の電話番号欄に直接入力してください':''}`);
+    if(!tel) warns.push(`${r.order}：電話番号がありません（佐川は必須）${r.source==='Amazon'?'／セラーセントラル→注文レポート→「FBM未出荷注文」をダウンロードして一緒に読み込むか、一覧の電話番号欄に直接入力してください':''}`);
     if(overflow.length) warns.push(`${r.order}：住所が4欄に収まらず末尾を切り捨てました（${overflow.join(' / ')}）`);
 
-    const zipOut = ($('zipHyphen') && $('zipHyphen').checked) ? fmtZipHyphen(r.zip) : zip;
-    rows.push(useTpl ? buildTemplateRow(r, '佐川急便')
-                     : [zipOut, name, '様', lines[0], lines[1], lines[2], lines[3], tel, item]);
+    // 列の並びはテンプレート（あれば）、無ければ内蔵の75列。どちらも列名から値を割り当てる
+    rows.push(buildRowForCols(useTpl ? okurijoTpl.cols : SAGAWA_HEADER, r, '佐川急便'));
   });
   return {rows, warns};
 }
@@ -1136,7 +1203,7 @@ function buildGenericRows(recs, method){
     if(zip.length!==7) warns.push(`${r.order}：郵便番号が7桁ではありません（${r.zip||'空欄'}）`);
     if(!String(r.name||'').trim()) warns.push(`${r.order}：お届け先氏名が空欄です`);
     if(method==='佐川急便' && !tel){
-      warns.push(`${r.order}：電話番号がありません（佐川は必須）${r.source==='Amazon'?'／セラーセントラルの注文レポートを一緒に読み込むか、一覧の電話番号欄に直接入力してください':''}`);
+      warns.push(`${r.order}：電話番号がありません（佐川は必須）${r.source==='Amazon'?'／セラーセントラル→注文レポート→「FBM未出荷注文」をダウンロードして一緒に読み込むか、一覧の電話番号欄に直接入力してください':''}`);
     }
     if(!r.addr2 && r.source==='Amazon') warns.push(`${r.order}：番地を自動判別できませんでした（住所1行目に丸ごと入っています）`);
     rows.push([
@@ -1251,12 +1318,18 @@ function exportFmt(){
 
     let html = `<b>佐川急便 取込CSVを ${rows.length} 件出力しました</b>`;
     const zipFmt = ($('zipHyphen').checked ? '郵便番号はハイフン付き（例 857-0103）' : '郵便番号はハイフンなし（例 8570103）');
+    if(useTpl && cols.length < SAGAWA_HEADER.length){
+      warns.push(`読み込んだテンプレートは${cols.length}列ですが、現在の佐川フォーマットは${SAGAWA_HEADER.length}列です。`+
+                 `佐川は列の位置で読むため、列数が違うと全項目がずれます。古いテンプレートなら「×」で解除するか、新しいテンプレートを読み込み直してください`);
+    }
     if(useTpl){
       const filled = templateFilledCols();
       html += `読み込んだテンプレート「${esc(okurijoTpl.name)}」の${cols.length}列に合わせて出力しています（${enc==='sjis'?'Shift_JIS':'UTF-8 BOM付き'}・全項目ダブルクォート・${zipFmt}）。<br>`;
       html += `値を入れた列（${filled.length}列）：${esc(filled.join(' / '))}<br>残りの${cols.length-filled.length}列は空欄です。ご依頼主・スピード指定などは取込先の初期設定で補ってください。<br>`;
     }else{
-      html += `テンプレートと同じ9列・全項目ダブルクォート・${enc==='sjis'?'Shift_JIS':'UTF-8（BOM付き）'}・${zipFmt}で出力しています。<br>`;
+      const filled = templateFilledCols(SAGAWA_HEADER);
+      html += `内蔵の佐川レイアウト${SAGAWA_HEADER.length}列で出力しています（${enc==='sjis'?'Shift_JIS':'UTF-8 BOM付き'}・全項目ダブルクォート・${zipFmt}）。<br>`;
+      html += `値を入れた列（${filled.length}列）：${esc(filled.join(' / '))}<br>`;
     }
     html += $('incDesc').checked
       ? 'テンプレート先頭の説明行を含めています。ヘッダー行しか取り込まれない場合はチェックを外してください。<br>'
@@ -1336,7 +1409,7 @@ function updateFmtNote(){
   if(mode==='sagawa'){
     note = okurijoTpl
       ? `テンプレート「${okurijoTpl.name}」の${okurijoTpl.cols.length}列に合わせて出力します。値が入るのは ${templateFilledCols().join(' / ')} の${templateFilledCols().length}列で、ご依頼主・荷札・スピード指定などは空欄のままにします。電話番号は必須です。`
-      : '佐川の取込テンプレート（9列 / UTF-8 BOM付き / 全項目ダブルクォート）と同じ形で出力します。1行目がヘッダー行です。テンプレートCSVを読み込ませると、その列構成に自動で合わせます。';
+      : `内蔵の佐川レイアウト（e飛伝 ${SAGAWA_HEADER.length}列 / UTF-8 BOM付き / 全項目ダブルクォート）で出力します。佐川は列の位置で読むため列数と順番が重要です。フォーマットが変わったら新しいテンプレートCSVを読み込ませてください。`;
     note += ' 郵便番号は857-0103のようなハイフン付きで出します（下4桁が0000になる場合はこの設定を確認してください）。';
   }
   $('fmtNote').textContent = note;
@@ -1355,12 +1428,17 @@ function renderFileList(){
     ? `<span class="f tpl">🧾 送り状テンプレート: ${esc(okurijoTpl.name)} <small>(${okurijoTpl.cols.length}列)</small>`+
       `<button data-tpl="1" title="解除">×</button></span>`
     : '';
-  if(!filesData.length && !tpl){ el.innerHTML=''; return; }
-  el.innerHTML = tpl + filesData.map((f,i)=>
+  const ps = phoneSrc
+    ? `<span class="f tel">☎️ 電話番号ソース: ${esc(phoneSrc.name)} <small>(${phoneSrc.count}件 / ${esc(phoneSrc.col)})</small>`+
+      `<button data-ps="1" title="解除">×</button></span>`
+    : '';
+  if(!filesData.length && !tpl && !ps){ el.innerHTML=''; return; }
+  el.innerHTML = tpl + ps + filesData.map((f,i)=>
     `<span class="f">📄 ${esc(f.name)} <small>(${f.rows.length}件)</small> <button data-i="${i}" title="削除">×</button></span>`
   ).join('');
   el.querySelectorAll('button').forEach(b=>b.addEventListener('click',e=>{
     if(e.target.dataset.tpl){ okurijoTpl=null; renderFileList(); updateFmtNote(); if(filesData.length) render(); return; }
+    if(e.target.dataset.ps){ phoneSrc=null; renderFileList(); if(filesData.length) render(); return; }
     filesData.splice(+e.target.dataset.i,1); renderFileList();
     if(filesData.length) render(); else $('clearBtn').click();
   }));
