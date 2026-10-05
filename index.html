@@ -180,6 +180,23 @@
               <option value="utf8">UTF-8 BOM付き（佐川・スプレッドシートはこれ）</option>
             </select>
           </label>
+          <label id="lenWrap" style="display:none;">品名・氏名の文字数（住所は16固定）
+            <select id="sgLen">
+              <option value="16" selected>16文字まで</option>
+              <option value="14">14文字まで</option>
+              <option value="12">12文字まで</option>
+              <option value="10">10文字まで</option>
+              <option value="32">32文字まで</option>
+            </select>
+          </label>
+          <label id="mngWrap" style="display:none;">お客様管理番号
+            <select id="sgMng">
+              <option value="16" selected>入れる（16桁まで）</option>
+              <option value="12">入れる（12桁まで）</option>
+              <option value="8">入れる（8桁まで）</option>
+              <option value="0">入れない（空欄）</option>
+            </select>
+          </label>
           <label id="zipWrap" style="display:none;">
             <input type="checkbox" id="zipHyphen" checked> 郵便番号にハイフンを入れる
           </label>
@@ -232,6 +249,15 @@ const SKU_SHORT = {
   'hp_sh01':'犬用炭酸入浴剤',
   'PB-RIU-FBA-001-L111':'姿勢サポーター', // Amazon
   'KETSURO_FBM':'結露防止スプレー',           // Amazon
+  // Amazon（暮らし工学Labo / eightショップ）— 品名は16文字以内に収める
+  'PB-KRS-003-FBM-0':'超強力消臭スプレー',
+  'PB-KRS-003-2P-FBM-0':'超強力消臭スプレー',
+  'PB-KRS-003-3P-FBM-0':'超強力消臭スプレー',
+  'PB-KRS-004-FBM-0':'ぬいぐるみクリーナー',
+  'PB-KRS-005-FBM-01':'消臭スプレー',
+  'PB-KRS-FBM-0':'ウィッグオイル',
+  'KETSURO_FBM-0':'結露防止スプレー',
+  'mimiuru_FBM-0':'みみうる 耳洗浄',
 };
 
 // pdf.js のワーカー設定
@@ -514,6 +540,16 @@ const RADICAL_FIX = {
   '⻱':'亀','⻲':'亀','⻳':'亀',
 };
 
+// 旧字体。佐川のJIS住所マスタに無く「JISマスタ該当無」「項目属性不一致」になるため常用字へ直す。
+// （Amazonの納品書PDFは「江戸」を「江戶」のような旧字体で埋め込むことがある）
+// 澤・邉・嶋・龍などは実在する表記なので変換しない（お客様の氏名を変えないため）
+const ITAIJI_FIX = {
+  '戶':'戸',   // 江戶川区→江戸川区 / 八戶市→八戸市 / 神戶市→神戸市 / 一戶→一戸
+  '﨑':'崎',
+  '德':'徳',
+  '瀨':'瀬',
+};
+
 // NFKCで半角化されるとShift_JISに無くなる文字を戻す
 const SJIS_SAFE_FIX = {
   '¥':'￥',   // ¥ → ￥
@@ -529,6 +565,8 @@ function normalizeJp(str){
   try{ t = t.normalize('NFKC'); }catch(e){}
   // NFKCで戻らないCJK部首補助を個別に置換
   t = t.replace(/[\u2E80-\u2EF3]/g, c => RADICAL_FIX[c] || c);
+  // 旧字体を常用字へ
+  t = t.replace(/[戶﨑德瀨]/g, c => ITAIJI_FIX[c] || c);
   // Shift_JISに無い記号を安全な文字へ
   t = t.replace(/[\u00A5\u00AD\u2010-\u2015\u2018\u2019\u201C\u201D\u2027\u2212]/g,
                 c => (c in SJIS_SAFE_FIX) ? SJIS_SAFE_FIX[c] : c);
@@ -537,6 +575,21 @@ function normalizeJp(str){
 
 // ===== 住所文字列を「都道府県+市区町村+町名 / 番地 / 建物」に自動分割 =====
 // Amazon納品書PDFは住所が1本の文字列でしか取れないため、ここで分ける
+// 同じ語句が連続して繰り返されている部分を1つにまとめる。
+// 納品書PDFは「埼玉県埼玉県越谷市」「八戸市吹上八戸市吹上」のように重複することがある。
+// 数字やハイフンを含む部分（番地）には適用しない。
+function collapseRepeats(s){
+  if(/[0-9０-９]/.test(s)) return s;
+  for(let len = Math.floor(s.length/2); len >= 2; len--){
+    for(let i = 0; i + 2*len <= s.length; i++){
+      if(s.substr(i,len) === s.substr(i+len,len)){
+        return collapseRepeats(s.slice(0, i+len) + s.slice(i+2*len));
+      }
+    }
+  }
+  return s;
+}
+
 function splitJpAddress(full){
   let s = String(full||'').replace(/[　\s]+/g,' ').trim();
   if(!s) return {addr1:'', addr2:'', addr3:''};
@@ -565,7 +618,7 @@ function splitJpAddress(full){
   if(bm){ banchi = bm[0].trim(); bldg = tail.slice(bm[0].length).trim(); }
 
   return {
-    addr1: (pref + city + town).trim(),
+    addr1: collapseRepeats((pref + city + town).trim()),
     addr2: banchi.trim(),
     addr3: bldg.trim()
   };
@@ -1020,35 +1073,35 @@ function fmtContent(r){
 
 // 住所を4欄に詰める。各欄 CP_MAX_LEN 文字以内になるよう貪欲に詰め、
 // 1要素が長すぎる場合は分割する
-function packAddress(r, maxLen){
-  const segs = [
-    (r.addr1 || r.addr || ''),   // 都道府県＋市区町村＋町名
-    (r.addr2 || ''),             // 番地
-    (r.addr3 || '')              // 建物・部屋番号
-  ].map(x=>String(x).trim()).filter(Boolean);
+function packAddress(r, maxLen, maxLines){
+  const LINES = maxLines || 4;
+  const a1 = String(r.addr1 || r.addr || '').trim();   // 都道府県＋市区町村＋町名
+  const a2 = String(r.addr2 || '').trim();             // 番地
+  const a3 = String(r.addr3 || '').trim();             // 建物・部屋番号
 
-  // 長すぎる要素は maxLen ごとに割る
-  const chunks=[];
-  segs.forEach(seg=>{
-    while(seg.length > maxLen){ chunks.push(seg.slice(0,maxLen)); seg = seg.slice(maxLen); }
-    if(seg) chunks.push(seg);
-  });
-
-  // 4欄に収まるなら「都道府県市区町村町名 / 番地 / 建物」の並びをそのまま活かす
-  let lines;
-  if(chunks.length <= 4){
-    lines = chunks.slice();
-  }else{
-    // 収まらない場合だけ、前の欄に詰めて4欄に寄せる
-    lines=[];
-    chunks.forEach(seg=>{
-      if(lines.length && (lines[lines.length-1]+seg).length <= maxLen) lines[lines.length-1] += seg;
-      else lines.push(seg);
-    });
+  // まず自然な並びで収まるならそのまま使う（JIS住所照合の都合で住所1は崩さないのが望ましい）
+  const natural = [a1, a2, a3].filter(Boolean);
+  if(natural.length <= LINES && natural.every(x => x.length <= maxLen)){
+    const lines = natural.slice();
+    while(lines.length < LINES) lines.push('');
+    return {lines, overflow: []};
   }
-  const overflow = lines.length > 4 ? lines.slice(4) : [];
-  while(lines.length < 4) lines.push('');
-  return {lines: lines.slice(0,4), overflow};
+
+  // 収まらない場合：住所1（JIS照合に使う部分）は先頭に置き、番地と建物を残りの欄に詰める
+  const lines = [];
+  let head = a1;
+  while(head.length > maxLen && lines.length < LINES - 1){
+    lines.push(head.slice(0, maxLen)); head = head.slice(maxLen);
+  }
+  if(head) lines.push(head.slice(0, maxLen));
+
+  let rest = [a2, a3].filter(Boolean).join(' ');
+  while(rest.length > 0 && lines.length < LINES){
+    lines.push(rest.slice(0, maxLen)); rest = rest.slice(maxLen);
+  }
+  const overflow = rest ? [rest] : [];
+  while(lines.length < LINES) lines.push('');
+  return {lines: lines.slice(0, LINES), overflow};
 }
 
 function csvCell(v){
@@ -1149,27 +1202,71 @@ function templateFilledCols(cols){
 }
 
 // 指定された列構成に合わせて1行を作る
-function buildRowForCols(cols, r, method){
-  const {lines} = packAddress(r, CP_MAX_LEN);
+// e飛伝の桁数制限。超えると「桁溢れ」で取込エラーになる
+// e飛伝の桁数制限。超えると「桁溢れ」で取込エラーになる。画面から変更できる
+const SG_LEN = { addr: 16, name: 16, item: 16, mng: 16 };
+
+// 画面の設定を SG_LEN に反映する（出力の直前に呼ぶ）
+function syncSgLen(){
+  // 住所は16文字固定（短くすると町名が不自然に割れてJIS照合に通らなくなる）
+  SG_LEN.addr = 16;
+  const n = parseInt($('sgLen') && $('sgLen').value, 10);
+  if(n > 0){ SG_LEN.name = n; SG_LEN.item = n; }
+  const m = $('sgMng') ? parseInt($('sgMng').value, 10) : 16;
+  SG_LEN.mng = isNaN(m) ? 16 : m;
+}
+
+// 1行に切り詰める。切り詰めた分は呼び出し側で警告に出す
+function clip(v, n){ const s = String(v||''); return s.length > n ? s.slice(0, n) : s; }
+
+// お客様管理番号：Amazonの注文番号（249-3566994-6246249 = 19桁）は16桁に収まらないので
+// 先頭の販売マーケット識別部を落として数字だけにする（35669946246249 = 14桁）
+function fmtMgmtNo(order, n){
+  if(!n || n <= 0) return '';      // 「入れない」を選んだとき
+  const o = String(order||'').trim();
+  if(o.length <= n) return o;
+  const m = o.match(/^\d{3}-(\d+)-(\d+)$/);
+  if(m){
+    const d = m[1] + m[2];
+    if(d.length <= n) return d;
+  }
+  const d = o.replace(/[^0-9A-Za-z]/g,'');
+  return d.length <= n ? d : d.slice(-n);
+}
+
+function buildRowForCols(cols, r, method, opt){
+  const o = opt || {};
+  const maxLen   = o.maxLen   || SG_LEN.addr;
+  const maxLines = o.maxLines || 4;
+  const {lines, overflow} = packAddress(r, maxLen, maxLines);
   const hy = $('zipHyphen') && $('zipHyphen').checked;
   const ctx = {
     zip: hy ? fmtZipHyphen(r.zip) : fmtZipPlain(r.zip),
-    name: String(r.name||'').trim(),
+    name: clip(String(r.name||'').trim(), SG_LEN.name),
     tel: fmtTel(r.tel),
-    item: fmtContent(r) || '雑貨',
+    item: clip(fmtContent(r) || '雑貨', SG_LEN.item),
     addr: lines,
     method: method || '',
     qty: String(parseInt(r.qty)||1),
     pieces: '1',          // 送り状1枚＝1口
-
-    order: String(r.order||''),
+    order: fmtMgmtNo(r.order, SG_LEN.mng),
   };
+  if(o.out){ o.out.overflow = overflow; }
   return cols.map(c=>templateValue(c, ctx));
 }
 
 // --- 佐川急便 取込CSV用の行を作る ---
 function buildSagawaRows(recs, useTpl){
   const rows=[]; const warns=[];
+  const cols = useTpl ? okurijoTpl.cols : SAGAWA_HEADER;
+
+  // テンプレートにある住所欄の数（e飛伝は住所1〜3の3欄、旧フォーマットは4欄）
+  // ご依頼主住所・荷送人などは数に入れない（お届け先の住所欄だけ）
+  const addrCols = cols.filter(c=>{
+    const t = String(c).replace(/\s/g,'');
+    return /住所\s*[0-9０-９]/.test(t) && !TPL_SKIP.test(t);
+  }).length;
+  const maxLines = Math.max(1, Math.min(4, addrCols || 4));
 
   const dup={}, dupName={};
   recs.forEach(r=>{ const k=groupKey(r); dup[k]=(dup[k]||0)+1; if(!dupName[k]) dupName[k]=r.name||k; });
@@ -1178,19 +1275,29 @@ function buildSagawaRows(recs, useTpl){
   });
 
   recs.forEach(r=>{
+    const who = (r.name||r.order||'').trim();
     const zip = fmtZipPlain(r.zip);
     const tel = fmtTel(r.tel);
-    const {lines, overflow} = packAddress(r, CP_MAX_LEN);
     const name = String(r.name||'').trim();
     const item = fmtContent(r) || '雑貨';
 
-    if(zip.length!==7) warns.push(`${r.order}：郵便番号が7桁ではありません（${r.zip||'空欄'}）`);
-    if(!name) warns.push(`${r.order}：お届け先氏名が空欄です`);
-    if(!tel) warns.push(`${r.order}：電話番号がありません（佐川は必須）${r.source==='Amazon'?'／セラーセントラル→注文レポート→「FBM未出荷注文」をダウンロードして一緒に読み込むか、一覧の電話番号欄に直接入力してください':''}`);
-    if(overflow.length) warns.push(`${r.order}：住所が4欄に収まらず末尾を切り捨てました（${overflow.join(' / ')}）`);
+    if(zip.length!==7) warns.push(`${who}：郵便番号が7桁ではありません（${r.zip||'空欄'}）`);
+    if(!name) warns.push(`${who||r.order}：お届け先氏名が空欄です`);
+    if(!tel) warns.push(`${who}：電話番号がありません（佐川は必須）${r.source==='Amazon'?'／セラーセントラル→注文レポート→「FBM未出荷注文」をダウンロードして一緒に読み込むか、一覧の電話番号欄に直接入力してください':''}`);
+    if(name.length > SG_LEN.name) warns.push(`${who}：お届け先氏名が${SG_LEN.name}文字を超えるため切り詰めました（${name}）`);
+    if(item.length > SG_LEN.item) warns.push(`${who}：品名が${SG_LEN.item}文字を超えるため切り詰めました（${item} → ${item.slice(0,SG_LEN.item)}）`);
 
-    // 列の並びはテンプレート（あれば）、無ければ内蔵の75列。どちらも列名から値を割り当てる
-    rows.push(buildRowForCols(useTpl ? okurijoTpl.cols : SAGAWA_HEADER, r, '佐川急便'));
+    // 住所がローマ字など、JIS住所マスタに該当しない可能性がある行を知らせる
+    const a1 = String(r.addr1||r.addr||'');
+    if(!/^(東京都|北海道|(?:京都|大阪)府|.{2,3}県)/.test(a1)){
+      warns.push(`${who}：住所が都道府県から始まっていません（${a1}）。佐川のJIS住所マスタに該当せず取込不可になります。一覧で住所を直すか、取込後に手修正してください`);
+    }
+
+    const out = {};
+    rows.push(buildRowForCols(cols, r, '佐川急便', {maxLen: SG_LEN.addr, maxLines, out}));
+    if(out.overflow && out.overflow.length){
+      warns.push(`${who}：住所が${maxLines}欄（各${SG_LEN.addr}文字）に収まらず末尾を切り捨てました（${out.overflow.join(' / ')}）`);
+    }
   });
   return {rows, warns};
 }
@@ -1306,6 +1413,7 @@ function exportFmt(){
   }
 
   if(mode==='sagawa'){
+    syncSgLen();
     const useTpl = !!okurijoTpl;
     const cols = useTpl ? okurijoTpl.cols : SAGAWA_HEADER;
     const {rows, warns} = buildSagawaRows(target, useTpl);
@@ -1315,6 +1423,11 @@ function exportFmt(){
       : SAGAWA_DESC;
     const csv = $('incDesc').checked ? (desc + body) : body;
     downloadCSV(csv, `佐川_${ts}.csv`, enc);
+
+    // 実際に出力した各列の最大文字数（桁溢れの切り分け用）
+    const maxLenByCol = cols.map((c,i)=>({c, n: rows.reduce((m,r)=>Math.max(m, String(r[i]||'').length), 0)}))
+                            .filter(x=>x.n>0)
+                            .map(x=>`${x.c}=${x.n}`).join(' / ');
 
     let html = `<b>佐川急便 取込CSVを ${rows.length} 件出力しました</b>`;
     const zipFmt = ($('zipHyphen').checked ? '郵便番号はハイフン付き（例 857-0103）' : '郵便番号はハイフンなし（例 8570103）');
@@ -1331,6 +1444,10 @@ function exportFmt(){
       html += `内蔵の佐川レイアウト${SAGAWA_HEADER.length}列で出力しています（${enc==='sjis'?'Shift_JIS':'UTF-8 BOM付き'}・全項目ダブルクォート・${zipFmt}）。<br>`;
       html += `値を入れた列（${filled.length}列）：${esc(filled.join(' / '))}<br>`;
     }
+    // 桁数のルールと、実際に出力した各列の最大文字数（桁溢れの切り分け用）
+    html += `桁溢れ対策として、住所各行は${SG_LEN.addr}文字以内、氏名・品名は${SG_LEN.item}文字以内、お客様管理番号は`
+          + (SG_LEN.mng>0 ? `${SG_LEN.mng}桁以内` : '空欄') + `に収めています。<br>`;
+    html += `実際の最大文字数：${esc(maxLenByCol)}<br>`;
     html += $('incDesc').checked
       ? 'テンプレート先頭の説明行を含めています。ヘッダー行しか取り込まれない場合はチェックを外してください。<br>'
       : 'テンプレート先頭の説明行は省いています（1行目がヘッダー）。<br>';
@@ -1416,6 +1533,8 @@ function updateFmtNote(){
   $('methodWrap').style.display = (mode==='generic') ? '' : 'none';
   $('descWrap').style.display   = (mode==='sagawa') ? '' : 'none';
   $('zipWrap').style.display    = (mode==='sagawa') ? '' : 'none';
+  $('lenWrap').style.display    = (mode==='sagawa') ? '' : 'none';
+  $('mngWrap').style.display    = (mode==='sagawa') ? '' : 'none';
   $('csvEnc').value = (mode==='clickpost') ? 'sjis' : 'utf8';
   $('fmtWarn').style.display='none';
 }
