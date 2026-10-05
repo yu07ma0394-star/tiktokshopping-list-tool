@@ -291,7 +291,7 @@ function parseCSV(text, delim){
 }
 
 // 送り状の取込テンプレート（見出しだけのCSV）かどうかを判定する
-const TPL_KEYS = ['お届け先郵便番号','郵便番号','お届け先氏名','お届け先名称1'];
+const TPL_KEYS = ['お届け先郵便番号','郵便番号','お届け先氏名','お届け先名称1','お届け先名称１','お届け先電話番号','お届け先住所1','お届け先住所１'];
 function detectOkurijoTemplate(aoa, fileName){
   let hdrIdx = -1;
   for(let i=0;i<Math.min(aoa.length,6);i++){
@@ -1023,24 +1023,61 @@ function buildClickpostRows(recs){
   return {rows, warns};
 }
 
-// テンプレートの列名から値を作る。知らない列名は空欄にする
+// テンプレートの列名から値を作る。
+// e飛伝の標準レイアウト（74列）のように「ご依頼主」「荷送人」「荷札」などの欄が混ざるため、
+// お届け先の情報を入れてよい列だけを埋め、それ以外は必ず空欄にする。
+const TPL_SKIP = /(ご依頼主|御依頼主|依頼主|荷送人|部署|担当者|荷札|編集|指定シール|元着|集約|SRC|営業所|保険|代引|消費税|決済|クール|配達日|配達指定|セット数|出荷予定日|出荷場|問合|問い合|メールアドレス|不在|コード|区分|荷姿|送り状No)/;
+
+// 全角数字を半角に
+function zenNum(x){
+  return String(x).replace(/[０-９]/g, d=>String.fromCharCode(d.charCodeAt(0)-0xFEE0));
+}
+
 function templateValue(colName, ctx){
   const c = String(colName).replace(/\s/g,'');
-  const num = c.match(/住所([1-4１-４])行目/) || c.match(/住所([1-4１-４])$/);
-  if(num){
-    const i = '1234'.indexOf(num[1].replace(/[１-４]/, d=>String.fromCharCode(d.charCodeAt(0)-0xFEE0)));
-    return ctx.addr[i] || '';
+  if(!c) return '';
+  // お届け先以外の欄は埋めない
+  if(TPL_SKIP.test(c)) return '';
+
+  // 住所1〜4（「お届け先住所１」「住所2行目（番地）」などに対応）
+  const am = c.match(/住所\s*([0-9０-９])/);
+  if(am){
+    const i = parseInt(zenNum(am[1]),10) - 1;
+    return (i>=0 && i<4) ? (ctx.addr[i] || '') : '';
   }
+  if(/住所/.test(c)) return ctx.addr[0] || '';
+
   if(/郵便番号/.test(c)) return ctx.zip;
-  if(/敬称/.test(c)) return '様';
-  if(/(氏名|名称1|名称１|宛名|受取人)/.test(c)) return ctx.name;
-  if(/電話/.test(c)) return ctx.tel;
-  if(/(品名|内容品|商品名)/.test(c)) return ctx.item;
-  if(/配送方法|便種|スピード/.test(c)) return ctx.method;
-  if(/(出荷個数|個数|数量)/.test(c)) return ctx.qty;
-  if(/(注文番号|注文ID|お客様管理番号|管理番号)/.test(c)) return ctx.order;
+  if(/電話/.test(c))     return ctx.tel;
+  if(/敬称/.test(c))     return '様';
+
+  // 氏名・名称（名称２以降は空欄）
+  if(/(氏名|宛名|受取人)/.test(c)) return ctx.name;
+  const nm = c.match(/名称\s*([0-9０-９])/);
+  if(nm) return (parseInt(zenNum(nm[1]),10)===1) ? ctx.name : '';
+  if(/名称/.test(c)) return ctx.name;
+
+  // 品名（品名２以降は空欄）
+  const pm = c.match(/品名\s*([0-9０-９]{1,2})/);
+  if(pm) return (parseInt(zenNum(pm[1]),10)===1) ? ctx.item : '';
+  if(/(内容品|品名|商品名)/.test(c)) return ctx.item;
+
+  if(/配送方法/.test(c)) return ctx.method;
+  // 「出荷個数」は荷物の口数なので常に1。商品の数量は「数量」欄のときだけ入れる
+  if(/(出荷個数|口数|個数)/.test(c)) return ctx.pieces;
+  if(/数量/.test(c)) return ctx.qty;
+  if(/(注文番号|注文ID|管理番号)/.test(c)) return ctx.order;
   if(/(都道府県|市区町村)/.test(c)) return ctx.addr[0] || '';
-  return '';   // 出力ステータスなど、こちらで埋めない列
+  return '';   // 出力ステータス、スピード指定などはこちらで埋めない
+}
+
+// このテンプレートで実際に値が入る列を調べる（出力後の確認表示用）
+function templateFilledCols(){
+  if(!okurijoTpl) return [];
+  const dummy = {zip:'1000001', name:'山田 太郎', tel:'09012345678', item:'商品',
+                 addr:['東京都千代田区千代田','1-1','ビル101',''], method:'佐川急便',
+                 qty:'1', pieces:'1', order:'000-0000000-0000000'};
+  return okurijoTpl.cols.filter(c=>templateValue(c, dummy) !== '');
 }
 
 // テンプレートの列構成に合わせて1行を作る
@@ -1055,6 +1092,8 @@ function buildTemplateRow(r, method){
     addr: lines,
     method: method || '',
     qty: String(parseInt(r.qty)||1),
+    pieces: '1',          // 送り状1枚＝1口
+
     order: String(r.order||''),
   };
   return okurijoTpl.cols.map(c=>templateValue(c, ctx));
@@ -1212,9 +1251,13 @@ function exportFmt(){
 
     let html = `<b>佐川急便 取込CSVを ${rows.length} 件出力しました</b>`;
     const zipFmt = ($('zipHyphen').checked ? '郵便番号はハイフン付き（例 857-0103）' : '郵便番号はハイフンなし（例 8570103）');
-    html += useTpl
-      ? `読み込んだテンプレート「${esc(okurijoTpl.name)}」の${cols.length}列に合わせて出力しています（${enc==='sjis'?'Shift_JIS':'UTF-8 BOM付き'}・全項目ダブルクォート・${zipFmt}）。<br>`
-      : `テンプレートと同じ9列・全項目ダブルクォート・${enc==='sjis'?'Shift_JIS':'UTF-8（BOM付き）'}・${zipFmt}で出力しています。<br>`;
+    if(useTpl){
+      const filled = templateFilledCols();
+      html += `読み込んだテンプレート「${esc(okurijoTpl.name)}」の${cols.length}列に合わせて出力しています（${enc==='sjis'?'Shift_JIS':'UTF-8 BOM付き'}・全項目ダブルクォート・${zipFmt}）。<br>`;
+      html += `値を入れた列（${filled.length}列）：${esc(filled.join(' / '))}<br>残りの${cols.length-filled.length}列は空欄です。ご依頼主・スピード指定などは取込先の初期設定で補ってください。<br>`;
+    }else{
+      html += `テンプレートと同じ9列・全項目ダブルクォート・${enc==='sjis'?'Shift_JIS':'UTF-8（BOM付き）'}・${zipFmt}で出力しています。<br>`;
+    }
     html += $('incDesc').checked
       ? 'テンプレート先頭の説明行を含めています。ヘッダー行しか取り込まれない場合はチェックを外してください。<br>'
       : 'テンプレート先頭の説明行は省いています（1行目がヘッダー）。<br>';
@@ -1292,7 +1335,7 @@ function updateFmtNote(){
   let note = FMT_NOTES[mode]||'';
   if(mode==='sagawa'){
     note = okurijoTpl
-      ? `テンプレート「${okurijoTpl.name}」の${okurijoTpl.cols.length}列（${okurijoTpl.cols.join(' / ')}）に合わせて出力します。電話番号は必須です。`
+      ? `テンプレート「${okurijoTpl.name}」の${okurijoTpl.cols.length}列に合わせて出力します。値が入るのは ${templateFilledCols().join(' / ')} の${templateFilledCols().length}列で、ご依頼主・荷札・スピード指定などは空欄のままにします。電話番号は必須です。`
       : '佐川の取込テンプレート（9列 / UTF-8 BOM付き / 全項目ダブルクォート）と同じ形で出力します。1行目がヘッダー行です。テンプレートCSVを読み込ませると、その列構成に自動で合わせます。';
     note += ' 郵便番号は857-0103のようなハイフン付きで出します（下4桁が0000になる場合はこの設定を確認してください）。';
   }
