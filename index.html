@@ -91,6 +91,8 @@
   td.pk .pkhint{display:block; font-size:9px; color:var(--gray); line-height:1.3;}
   td.pk-set{background:#fff4e6;}
   td.pk-set input{border-color:#e8a84f; font-weight:bold;}
+  td.pk-guess{background:#fdecea;}
+  td.pk-guess input{border-color:#d9534f; font-weight:bold; color:#a3302b;}
   td.pk-man{background:#fffaf0;}
   td.pk-man input{border-color:#f0c36d; font-weight:bold;}
   td.pkdiff{background:#fff4e6; font-weight:bold; color:#8a4a08;}
@@ -280,6 +282,8 @@ const SKU_SHORT = {
   'PB-KRS-FBM-0':'ウィッグオイル',
   'KETSURO_FBM-0':'結露防止スプレー',
   'mimiuru_FBM-0':'みみうる 耳洗浄',
+  'dryshampoo_FBM':'ドライシャンプー',
+  'PB-RIU-FBM-001-L1-eight':'姿勢サポーター',
 };
 
 // pdf.js のワーカー設定
@@ -802,6 +806,7 @@ let telManual = {};   // 一覧で手入力した電話番号
 let nameManual = {};  // 一覧で修正した宛名
 let packManual = {};  // 一覧で修正した梱包数
 let setsCount = 0;    // 注文数と梱包数が違う明細の数（セット品など）
+let guessCount = 0;   // 入り数を商品名から推定した明細の数（要確認）
 let telFilled = 0;    // 注文レポートから補完できた件数
 let merged = 0;       // 別ファイルの同一注文を統合した件数
 let currentGroups = [];
@@ -893,6 +898,7 @@ function render(){
   const totalLines = recs.length;
   const totalQty = recs.reduce((s,r)=>s+(parseInt(r.qty)||1),0);
   setsCount = recs.filter(r=>packCount(r) !== (parseInt(r.qty)||1)).length;
+  guessCount = recs.filter(r=>!packManual[itemKey(r)] && packInfo(r).from==='name').length;
 
   // summary
   const summ = {};
@@ -953,8 +959,10 @@ function render(){
             `<td class="wt" rowspan="${n}">${w!=null ? w+'kg' : ''}</td>`;
       }
       const ps = packSize(r), pc = packCount(r), qn = parseInt(r.qty)||1;
-      const pkCls = packManual[itemKey(r)] ? 'pk-man' : (ps>1 ? 'pk-set' : '');
-      const pkHint = ps>1 ? `${ps}本入×${qn}` : '';
+      const pkInfo = packInfo(r);
+      const pkCls = packManual[itemKey(r)] ? 'pk-man'
+                  : (ps>1 ? (pkInfo.from==='name' ? 'pk-guess' : 'pk-set') : '');
+      const pkHint = ps>1 ? `${ps}本入×${qn}${pkInfo.from==='name' ? '（推定）' : ''}` : '';
       th+=`<td class="c src">${esc(SRC_LABEL[r.source]||r.source||'')}</td>`+
           `<td class="ord">${esc(r.order)}</td><td>${esc(r.product)}</td><td class="c">${esc(r.qty)}</td>`+
           `<td class="pk ${pkCls}">`+
@@ -1145,17 +1153,39 @@ const SKU_PACK = {
 };
 
 // 入り数：SKU登録 → SKU名の「-2P-」 → 商品名の「×2」「2本セット」から推定
-function packSize(r){
-  if(SKU_PACK[r.sku]) return SKU_PACK[r.sku];
+// 入り数を判定する。判定根拠も返すので、推定か確定かを画面に出せる
+// 商品名のキャッチコピー（「ヒアルロン酸×5種」「理学療法士監修 × 100g超軽量」など）を
+// 入り数と誤認しないよう、単位の直後にある「×数字」だけを見る
+const PACK_UNIT = '(?:ml|mL|ML|L|g|kg|個|本|枚|袋|包|錠|粒|セット|パック|組)';
+const PACK_NG   = '(?:種|類|倍|％|%|円|度|色|層|重|時間|日|週|ヶ月|か月|年|歳|才|名|人|g|kg|ml|mL|mm|cm|m)';
+
+function packInfo(r){
+  // ① SKU登録表（最優先・確定）
+  if(SKU_PACK[r.sku]) return {size: SKU_PACK[r.sku], from: 'sku'};
+
+  // ② SKU名の「-2P-」「_3P」（確定扱い）
   const sku = String(r.sku||'');
   let m = sku.match(/[-_](\d{1,2})\s*P(?:[-_]|$)/i);
-  if(m) return parseInt(m[1],10);
-  const nm = String(r.fullname||'');
-  m = nm.match(/[×x✕]\s*(\d{1,2})\s*(?:本|個|袋|缶|枚|セット|P|p)?/);
-  if(m) return parseInt(m[1],10);
-  m = nm.match(/(\d{1,2})\s*(?:本|個|袋|枚)\s*セット/);
-  if(m) return parseInt(m[1],10);
-  return 1;
+  if(m) return {size: parseInt(m[1],10), from: 'sku'};
+
+  // ③ 商品名の「300ml×2」のように、単位の直後に続く×数字だけを拾う（推定）
+  //    【】（）内の宣伝文句は先に除外する
+  const nm = String(r.fullname||'')
+    .replace(/【[^】]*】/g,' ')
+    .replace(/[（(][^)）]*[)）]/g,' ');
+  m = nm.match(new RegExp(PACK_UNIT + '\\s*[×x✕]\\s*(\\d{1,2})(?![0-9])(?!\\s*' + PACK_NG + ')'));
+  if(m) return {size: parseInt(m[1],10), from: 'name'};
+
+  // ④ 「2本セット」「3個セット」（推定）
+  m = nm.match(/(\d{1,2})\s*(?:本|個|袋|枚|パック)\s*セット/);
+  if(m) return {size: parseInt(m[1],10), from: 'name'};
+
+  return {size: 1, from: 'none'};
+}
+
+function packSize(r){
+  const n = packInfo(r).size;
+  return (n >= 1 && n <= 20) ? n : 1;   // 異常値は1に戻す
 }
 
 // 明細を一意に指す（梱包数の手入力を保持するためのキー）
@@ -1613,7 +1643,8 @@ function updateCounts(){
                  (off ? `<span class="badge x">未選択 <b>${off}</b> 件</span>` : '')+
                  (telFilled ? `<span class="badge sg">電話番号を補完 <b>${telFilled}</b> 件</span>` : '')+
                  (noTel ? `<span class="badge ng">電話番号なし <b>${noTel}</b> 件</span>` : '')+
-                 (setsCount ? `<span class="badge sg">注文数≠梱包数 <b>${setsCount}</b> 件</span>` : '');
+                 (setsCount ? `<span class="badge sg">注文数≠梱包数 <b>${setsCount}</b> 件</span>` : '')+
+                 (guessCount ? `<span class="badge ng">入り数を推定 <b>${guessCount}</b> 件（要確認）</span>` : '');
 }
 
 document.querySelectorAll('button[data-bulk]').forEach(btn=>{
