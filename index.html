@@ -83,6 +83,17 @@
   td.nm input:focus{border-color:var(--blue); background:#fff; outline:none;}
   td.nm .nmprint{display:none; font-size:12px;}
   td.nm-man input{border-color:#f0c36d; background:#fffaf0;}
+  th.pkh{width:74px; text-align:center;}
+  td.pk{text-align:center; padding:2px 3px;}
+  td.pk input{width:46px; font-size:12px; padding:3px; text-align:center;
+    border:1px solid var(--line); border-radius:5px; font-variant-numeric:tabular-nums;}
+  td.pk .pkprint{display:none; font-size:12px; font-weight:bold;}
+  td.pk .pkhint{display:block; font-size:9px; color:var(--gray); line-height:1.3;}
+  td.pk-set{background:#fff4e6;}
+  td.pk-set input{border-color:#e8a84f; font-weight:bold;}
+  td.pk-man{background:#fffaf0;}
+  td.pk-man input{border-color:#f0c36d; font-weight:bold;}
+  td.pkdiff{background:#fff4e6; font-weight:bold; color:#8a4a08;}
   th.telh{width:120px;}
   td.tel{padding:2px 4px;}
   td.tel input{width:100%; font-size:11px; padding:3px 4px; border:1px solid var(--line);
@@ -122,6 +133,9 @@
     td.chk .chkprint{display:inline;}
     td.tel input{display:none;}
     td.tel .telprint{display:inline;}
+    td.pk input{display:none;}
+    td.pk .pkprint{display:inline;}
+    td.pk-set,td.pk-man{background:#fff !important;}
     td.nm input{display:none;}
     td.nm .nmprint{display:inline;}
     td.nm-man{background:#fff !important;}
@@ -249,10 +263,18 @@ const SKU_SHORT = {
   'hp_sh01':'犬用炭酸入浴剤',
   'PB-RIU-FBA-001-L111':'姿勢サポーター', // Amazon
   'KETSURO_FBM':'結露防止スプレー',           // Amazon
+  'KETSURO_FBM-0':'結露防止スプレー 100ml',
+  'PB-KRS-003-FBM-0':'超強力消臭スプレー 300ml',
+  'PB-KRS-003-2P-FBM-0':'超強力消臭スプレー 300ml×2本',
+  'PB-KRS-003-3P-FBM-0':'超強力消臭スプレー 300ml×3本',
+  'PB-KRS-004-FBM-0':'ぬいぐるみクリーナー 200ml',
+  'PB-KRS-005-FBM-01':'消臭スプレー お部屋用',
+  'PB-KRS-FBM-0':'ウィッグオイル 300mL',
+  'mimiuru_FBM-0':'みみうる 耳洗浄液',
   // Amazon（暮らし工学Labo / eightショップ）— 品名は16文字以内に収める
   'PB-KRS-003-FBM-0':'超強力消臭スプレー',
-  'PB-KRS-003-2P-FBM-0':'超強力消臭スプレー',
-  'PB-KRS-003-3P-FBM-0':'超強力消臭スプレー',
+  'PB-KRS-003-2P-FBM-0':'超強力消臭スプレー2本',
+  'PB-KRS-003-3P-FBM-0':'超強力消臭スプレー3本',
   'PB-KRS-004-FBM-0':'ぬいぐるみクリーナー',
   'PB-KRS-005-FBM-01':'消臭スプレー',
   'PB-KRS-FBM-0':'ウィッグオイル',
@@ -281,7 +303,7 @@ $('genBtn').addEventListener('click', render);
 $('printBtn').addEventListener('click', ()=>window.print());
 $('fmtBtn').addEventListener('click', exportFmt);
 $('clearBtn').addEventListener('click', ()=>{
-  filesData=[]; currentRecs=[]; currentGroups=[]; pickMap={}; telManual={}; nameManual={}; telFilled=0; merged=0; renderFileList();  // テンプレートは残す $('output').style.display='none';
+  filesData=[]; currentRecs=[]; currentGroups=[]; pickMap={}; telManual={}; nameManual={}; packManual={}; telFilled=0; merged=0; renderFileList();  // テンプレートは残す $('output').style.display='none';
   $('emptyMsg').style.display='block'; $('emptyMsg').textContent='ファイルを読み込むとここに一覧が表示されます。';
   $('genBtn').disabled=true; $('printBtn').disabled=true; $('fmtBtn').disabled=true;
   fileInput.value='';
@@ -454,8 +476,11 @@ function pickName(shipName, buyerName){
   const buyer = String(buyerName||'').trim();
   if(!ship)  return buyer;
   if(!buyer) return ship;
-  // 発送先の氏名が日本語として成立していない（例：「t」）ときだけ購入者名を使う
-  if(jpCharCount(ship) < 2) return buyer;
+  // 発送先の氏名が日本語として成立していない（例：「t」「Y.K.」）とき
+  if(jpCharCount(ship) < 2){
+    if(jpCharCount(buyer) >= 2) return buyer;              // 日本語表記があればそちら
+    return (ship.length >= buyer.length) ? ship : buyer;   // どちらもローマ字なら情報量の多い方
+  }
   // 片方がもう一方を含むなら情報量の多い方（例：購入者「時吉」／発送先「時吉 保志」）
   const a = ship.replace(/\s/g,''), b = buyer.replace(/\s/g,'');
   if(a.includes(b) || b.includes(a)) return (a.length >= b.length) ? ship : buyer;
@@ -477,7 +502,12 @@ function parseAmazonPage(lines){
   if(zi>=0){
     for(let j=zi+1;j<lines.length;j++){
       const l=lines[j];
-      if(/様\s*$/.test(l)){ shipName=l.replace(/\s*様\s*$/,'').trim(); break; }
+      if(/様\s*$/.test(l)){
+        shipName = l.replace(/\s*様\s*$/,'').trim();
+        // 「様」だけの行のときは、氏名が次の行に入っている（ローマ字宛名のレイアウト）
+        if(!shipName && lines[j+1]) shipName = lines[j+1].trim();
+        break;
+      }
       if(/^(注文日|配送方法|購入者|出品者|注文番号|発送先|お届け先|数量|Amazon)/.test(l)) continue;
       addrParts.push(l);
     }
@@ -557,6 +587,8 @@ const SJIS_SAFE_FIX = {
   '‐':'-', '‑':'-', '‒':'-', '–':'-', '—':'-',
   '―':'-', '−':'-', '­':'',
   '‘':"'", '’':"'", '“':'"', '”':'"',
+  // Shift_JIS(CP932)に無い旧字体・異体字
+  '戶':'戸','﨑':'崎','德':'徳','曾':'曽','摑':'掴','濵':'浜','祐':'祐',
 };
 
 function normalizeJp(str){
@@ -570,6 +602,7 @@ function normalizeJp(str){
   // Shift_JISに無い記号を安全な文字へ
   t = t.replace(/[\u00A5\u00AD\u2010-\u2015\u2018\u2019\u201C\u201D\u2027\u2212]/g,
                 c => (c in SJIS_SAFE_FIX) ? SJIS_SAFE_FIX[c] : c);
+  t = t.replace(/[戶﨑德曾摑濵]/g, c => SJIS_SAFE_FIX[c] || c);
   return t;
 }
 
@@ -767,6 +800,8 @@ function fmtZip(z, hyphen){
 let pickMap = {};
 let telManual = {};   // 一覧で手入力した電話番号
 let nameManual = {};  // 一覧で修正した宛名
+let packManual = {};  // 一覧で修正した梱包数
+let setsCount = 0;    // 注文数と梱包数が違う明細の数（セット品など）
 let telFilled = 0;    // 注文レポートから補完できた件数
 let merged = 0;       // 別ファイルの同一注文を統合した件数
 let currentGroups = [];
@@ -857,13 +892,22 @@ function render(){
 
   const totalLines = recs.length;
   const totalQty = recs.reduce((s,r)=>s+(parseInt(r.qty)||1),0);
+  setsCount = recs.filter(r=>packCount(r) !== (parseInt(r.qty)||1)).length;
 
   // summary
   const summ = {};
-  recs.forEach(r=>{ const k=r.src+''+r.product; summ[k]=(summ[k]||0)+(parseInt(r.qty)||1); });
-  let sh='<table class="sumtbl"><thead><tr><th>ファイル</th><th>商品</th><th class="c">合計個数</th></tr></thead><tbody>';
+  recs.forEach(r=>{
+    const k=r.src+''+r.product;
+    if(!summ[k]) summ[k]={qty:0, pack:0};
+    summ[k].qty  += (parseInt(r.qty)||1);
+    summ[k].pack += packCount(r);
+  });
+  let sh='<table class="sumtbl"><thead><tr><th>ファイル</th><th>商品</th>'+
+         '<th class="c">注文数</th><th class="c">用意する数</th></tr></thead><tbody>';
   Object.keys(summ).forEach(k=>{ const [src,prod]=k.split('');
-    sh+=`<tr><td>${esc(src)}</td><td>${esc(prod)}</td><td class="c">${summ[k]}</td></tr>`; });
+    const d=summ[k];
+    const mark = d.pack!==d.qty ? ' class="c pkdiff"' : ' class="c"';
+    sh+=`<tr><td>${esc(src)}</td><td>${esc(prod)}</td><td class="c">${d.qty}</td><td${mark}>${d.pack}</td></tr>`; });
   sh+='</tbody></table>';
   $('summary').innerHTML=sh;
 
@@ -880,7 +924,8 @@ function render(){
 
   let th='<table><thead><tr><th class="chkh"><input type="checkbox" id="chkAll"></th><th class="c">No</th>'+
          '<th>宛名</th><th>〒・住所</th><th class="telh">電話番号</th><th class="wh">重量</th>'+
-         '<th class="c">元</th><th>注文ID</th><th>商品名</th><th class="c">個数</th><th class="trackh">追跡番号</th></tr></thead><tbody>';
+         '<th class="c">元</th><th>注文ID</th><th>商品名</th><th class="c">注文数</th>'+
+         '<th class="pkh">梱包数</th><th class="trackh">追跡番号</th></tr></thead><tbody>';
   groups.forEach((gp,gi)=>{
     const n=gp.items.length;
     const addr=(fmtZip(gp.zip,true)+' '+gp.addr).trim();
@@ -907,8 +952,16 @@ function render(){
               `<span class="telprint">${esc(telVal)}</span></td>`+
             `<td class="wt" rowspan="${n}">${w!=null ? w+'kg' : ''}</td>`;
       }
+      const ps = packSize(r), pc = packCount(r), qn = parseInt(r.qty)||1;
+      const pkCls = packManual[itemKey(r)] ? 'pk-man' : (ps>1 ? 'pk-set' : '');
+      const pkHint = ps>1 ? `${ps}本入×${qn}` : '';
       th+=`<td class="c src">${esc(SRC_LABEL[r.source]||r.source||'')}</td>`+
-          `<td class="ord">${esc(r.order)}</td><td>${esc(r.product)}</td><td class="c">${esc(r.qty)}</td>`;
+          `<td class="ord">${esc(r.order)}</td><td>${esc(r.product)}</td><td class="c">${esc(r.qty)}</td>`+
+          `<td class="pk ${pkCls}">`+
+            `<input type="number" min="1" class="pkbox" data-key="${esc(itemKey(r))}" value="${pc}">`+
+            `<span class="pkprint">${pc}</span>`+
+            (pkHint ? `<small class="pkhint">${esc(pkHint)}</small>` : '')+
+          `</td>`;
       if(li===0) th+=`<td class="track" rowspan="${n}"></td>`;
       th+='</tr>';
     });
@@ -921,6 +974,18 @@ function render(){
       const key = e.target.dataset.key, v = e.target.value.trim();
       if(v) nameManual[key] = v; else delete nameManual[key];
       // 再描画はイベント処理の後に回す（入力欄が消える瞬間のDOM衝突を避ける）
+      setTimeout(()=>{ render(); $('fmtWarn').style.display='none'; }, 0);
+    });
+  });
+
+  $('listTable').querySelectorAll('.pkbox').forEach(box=>{
+    box.addEventListener('change', e=>{
+      const key = e.target.dataset.key;
+      const v = parseInt(e.target.value,10);
+      const rec = currentRecs.find(r=>itemKey(r)===key);
+      const auto = rec ? (parseInt(rec.qty)||1) * packSize(rec) : 1;
+      if(v>0 && v!==auto) packManual[key] = String(v); else delete packManual[key];
+      e.target.value = v>0 ? v : auto;
       setTimeout(()=>{ render(); $('fmtWarn').style.display='none'; }, 0);
     });
   });
@@ -976,7 +1041,8 @@ function render(){
   }
 
   const today=new Date().toLocaleDateString('ja-JP');
-  $('meta').textContent=`作成日: ${today}　／　発送先: ${groups.length} 件　明細: ${totalLines} 件　総個数: ${totalQty} 個`
+  const totalPack = recs.reduce((s,r)=>s+packCount(r),0);
+  $('meta').textContent=`作成日: ${today}　／　発送先: ${groups.length} 件　明細: ${totalLines} 件　注文数: ${totalQty} 個　梱包数: ${totalPack} 個`
     + (merged ? `　／　重複統合: ${merged} 件` : '')
     + `　（読込ファイル: ${filesData.map(f=>f.name).join(', ')}）`;
 
@@ -1045,6 +1111,7 @@ function fmtTel(t){
 // 内容品：短縮商品名（個数2以上なら ×n）
 // 未登録SKUは商品名から【…】を除き、先頭の語だけを使って短くする
 function contentName(r){
+  if(SKU_CONTENT[r.sku]) return SKU_CONTENT[r.sku];
   if(SKU_SHORT[r.sku]) return SKU_SHORT[r.sku];
   let s = String(r.fullname||'')
     .replace(/[¥￥][\d,]+.*$/,'')      // 末尾の金額を除去
@@ -1063,12 +1130,50 @@ function contentName(r){
   if(!out) out = (words[0]||s).slice(0, CP_MAX_LEN);
   return out || '雑貨';
 }
+// 内容品・品名に使う基本名。セット品は入り数を名前に含めない
+// （一覧には「超強力消臭スプレー2本」と出すが、CSVは「超強力消臭スプレー×4」とする）
+const SKU_CONTENT = {
+  'PB-KRS-003-2P-FBM-0':'超強力消臭スプレー',
+  'PB-KRS-003-3P-FBM-0':'超強力消臭スプレー',
+};
+
+// ===== 梱包数（入り数 × 注文数量） =====
+// SKUごとの入り数。セット品はここに書けば確実に効く
+const SKU_PACK = {
+  'PB-KRS-003-2P-FBM-0': 2,
+  'PB-KRS-003-3P-FBM-0': 3,
+};
+
+// 入り数：SKU登録 → SKU名の「-2P-」 → 商品名の「×2」「2本セット」から推定
+function packSize(r){
+  if(SKU_PACK[r.sku]) return SKU_PACK[r.sku];
+  const sku = String(r.sku||'');
+  let m = sku.match(/[-_](\d{1,2})\s*P(?:[-_]|$)/i);
+  if(m) return parseInt(m[1],10);
+  const nm = String(r.fullname||'');
+  m = nm.match(/[×x✕]\s*(\d{1,2})\s*(?:本|個|袋|缶|枚|セット|P|p)?/);
+  if(m) return parseInt(m[1],10);
+  m = nm.match(/(\d{1,2})\s*(?:本|個|袋|枚)\s*セット/);
+  if(m) return parseInt(m[1],10);
+  return 1;
+}
+
+// 明細を一意に指す（梱包数の手入力を保持するためのキー）
+function itemKey(r){ return r.order+'|'+(r.sku||'')+'|'+r.rowIdx; }
+
+// 実際に梱包する数。手入力があればそれを最優先
+function packCount(r){
+  const manual = packManual[itemKey(r)];
+  if(manual) return parseInt(manual,10);
+  return (parseInt(r.qty)||1) * packSize(r);
+}
+
 function fmtContent(r){
-  const q = parseInt(r.qty)||1;
+  const n = packCount(r);           // 注文数量ではなく、実際に梱包する数
   let base = contentName(r).trim();
   const v = r.variation;
   if(v && v!=='デフォルト') base += ' '+v;
-  return q>1 ? `${base}×${q}` : base;
+  return n>1 ? `${base}×${n}` : base;
 }
 
 // 住所を4欄に詰める。各欄 CP_MAX_LEN 文字以内になるよう貪欲に詰め、
@@ -1478,6 +1583,15 @@ function exportFmt(){
   }
 }
 
+// 梱包数の合計表示を更新（手入力で変わったとき用）
+function updatePackTotal(){
+  if(!currentRecs.length) return;
+  setsCount = currentRecs.filter(r=>packCount(r) !== (parseInt(r.qty)||1)).length;
+  const totalPack = currentRecs.reduce((s,r)=>s+packCount(r),0);
+  const el=$('meta');
+  if(el) el.textContent = el.textContent.replace(/梱包数: \d+ 個/, `梱包数: ${totalPack} 個`);
+}
+
 // ヘッダーの全選択チェックの状態を同期（一部だけONなら中間表示）
 function syncChkAll(){
   const all = $('chkAll');
@@ -1498,7 +1612,8 @@ function updateCounts(){
   el.innerHTML = `<span class="badge cp">選択中 <b>${on}</b> 件</span>`+
                  (off ? `<span class="badge x">未選択 <b>${off}</b> 件</span>` : '')+
                  (telFilled ? `<span class="badge sg">電話番号を補完 <b>${telFilled}</b> 件</span>` : '')+
-                 (noTel ? `<span class="badge ng">電話番号なし <b>${noTel}</b> 件</span>` : '');
+                 (noTel ? `<span class="badge ng">電話番号なし <b>${noTel}</b> 件</span>` : '')+
+                 (setsCount ? `<span class="badge sg">注文数≠梱包数 <b>${setsCount}</b> 件</span>` : '');
 }
 
 document.querySelectorAll('button[data-bulk]').forEach(btn=>{
